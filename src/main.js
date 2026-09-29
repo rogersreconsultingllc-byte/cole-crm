@@ -115,8 +115,11 @@ async function loadTable(t) {
 }
 async function loadAll() { await Promise.all(Object.keys(TABLE_KEY).map(loadTable)) }
 const reloadTimers = {}
+let liveChannel = null
 function subscribe() {
-  sb.channel('crm-live')
+  if (liveChannel) return
+  liveChannel = sb.channel('crm-live-' + Math.random().toString(36).slice(2, 8))
+  liveChannel
     .on('postgres_changes', { event: '*', schema: 'public' }, payload => {
       const t = payload.table; if (!TABLE_KEY[t]) return
       clearTimeout(reloadTimers[t])
@@ -140,15 +143,24 @@ async function boot() {
   })
   start()
 }
+let starting = false
 async function start() {
+  if (starting) return
+  starting = true
+  try { await startInner() } finally { starting = false }
+}
+async function startInner() {
   const app = document.getElementById('app')
-  if (!S.session) { app.replaceChildren(loginView()); return }
+  if (!S.session) {
+    if (liveChannel) { sb.removeChannel(liveChannel); liveChannel = null }
+    app.replaceChildren(loginView()); return
+  }
   app.replaceChildren(el('div', { class: 'login' }, el('div', { class: 'card' }, el('p', { class: 'muted', text: 'Loading your CRM…' }))))
   try {
     const { data: me } = await sb.from('app_users').select('email').limit(1)
     if (!me || !me.length) { app.replaceChildren(deniedView()); return }
     await loadAll()
-    subscribe()
+    try { subscribe() } catch (e) { console.warn('live updates', e) }
     render()
     locateMissing()
   } catch (e) {
