@@ -115,9 +115,15 @@ const dorInfo = code => { const n = parseInt(code, 10); return isNaN(n) ? null :
 /* ---------- Data ---------- */
 async function loadTable(t) {
   const order = { contacts: 'name', conversations: 'talked_on', buyers: 'name', pins: 'created_at', properties: 'address' }[t]
-  const { data, error } = await sb.from(t).select('*').order(order)
-  if (error) throw error
-  S[TABLE_KEY[t]] = data || []
+  // Supabase returns at most 1,000 rows per request — page through so nothing is silently cut off
+  const PAGE = 1000, rows = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb.from(t).select('*').order(order).order('id').range(from, from + PAGE - 1)
+    if (error) throw error
+    rows.push(...(data || []))
+    if (!data || data.length < PAGE) break
+  }
+  S[TABLE_KEY[t]] = rows
 }
 async function loadAll() { await Promise.all(Object.keys(TABLE_KEY).map(loadTable)) }
 const reloadTimers = {}
