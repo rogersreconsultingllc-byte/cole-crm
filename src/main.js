@@ -7,7 +7,16 @@ import './style.css'
 /* ---------- Config ---------- */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://ucjicbvlctzrauahzvgf.supabase.co'
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY || 'sb_publishable_pYaBkCJkb5RpPyFhPwkibw_8gZ7TukF'
-const PARCELS_URL = 'https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/Florida_Statewide_Cadastral/FeatureServer/0'
+// County parcel layers from the Southwest Florida Water Management District (public, supports area searches)
+const PARCEL_SVC = 'https://www25.swfwmd.state.fl.us/arcgis12/rest/services/BaseVector/parcel_search/MapServer'
+const COUNTY_LAYERS = [{ id: 15, name: 'Sarasota' }, { id: 10, name: 'Manatee' }, { id: 1, name: 'Charlotte' }, { id: 13, name: 'Pinellas' }, { id: 7, name: 'Hillsborough' }]
+const CITY_COUNTY = {
+  sarasota: 'Sarasota', venice: 'Sarasota', nokomis: 'Sarasota', osprey: 'Sarasota', englewood: 'Sarasota', 'north port': 'Sarasota', 'longboat key': 'Sarasota', 'siesta key': 'Sarasota',
+  bradenton: 'Manatee', 'lakewood ranch': 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee', parrish: 'Manatee', 'anna maria': 'Manatee', 'holmes beach': 'Manatee',
+  tampa: 'Hillsborough', brandon: 'Hillsborough', riverview: 'Hillsborough', 'plant city': 'Hillsborough', lutz: 'Hillsborough',
+  'st petersburg': 'Pinellas', 'st. petersburg': 'Pinellas', 'saint petersburg': 'Pinellas', clearwater: 'Pinellas', largo: 'Pinellas', dunedin: 'Pinellas', 'pinellas park': 'Pinellas', seminole: 'Pinellas', 'tarpon springs': 'Pinellas',
+  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte',
+}
 const HOME = [27.3364, -82.5307] // Sarasota
 const TYPES = ['Owner', 'Seller', 'Buyer', 'Leasing', 'Other']
 const STAGES = ['Prospect', 'Contacted', 'Meeting', 'BOV', 'Listing', 'Under contract', 'Closed', 'Dead']
@@ -72,6 +81,8 @@ const moneyShort = n => { if (n == null || n === '') return ''; n = Number(n); r
 const num = n => n == null || n === '' ? '—' : Number(n).toLocaleString()
 const esc = s => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const nowIso = () => new Date().toISOString()
+const fmtTime = t => { if (!t) return ''; const [h, m] = String(t).split(':').map(Number); return `${((h + 11) % 12) + 1}:${pad(m || 0)} ${h < 12 ? 'AM' : 'PM'}` }
+const byWhen = (a, b) => (a.next_follow_up || '9999').localeCompare(b.next_follow_up || '9999') || (a.next_time || '99').localeCompare(b.next_time || '99') || (a.priority || 'C').localeCompare(b.priority || 'C')
 
 function toast(msg) {
   const t = el('div', { class: 'toast', text: msg }); document.body.append(t)
@@ -234,12 +245,12 @@ function contactRow(c, { showDate = true } = {}) {
       el('div', { class: 'name' }, c.name, c.contact_type && c.contact_type !== 'Owner' ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,
         late ? el('span', { class: 'late', text: late + 'd overdue' }) : null),
       el('div', { class: 'sub', text: [c.next_note, c.address].filter(Boolean).join(' · ') || '—' })),
-    showDate ? el('div', { class: 'when', text: fmt(c.next_follow_up, { weekday: 'short', month: 'short', day: 'numeric' }) }) : null,
+    showDate ? el('div', { class: 'when', text: fmt(c.next_follow_up, { weekday: 'short', month: 'short', day: 'numeric' }) + (c.next_time ? ' · ' + fmtTime(c.next_time) : '') }) : null,
     tel ? el('a', { class: 'tel', href: tel, onclick: e => e.stopPropagation(), text: c.phone }) : null)
 }
 function todayView() {
   const T = today(), Ts = ymd(T), wk = new Date(T); wk.setDate(wk.getDate() + 7); const Ws = ymd(wk)
-  const withDate = S.contacts.filter(c => c.next_follow_up).sort((a, b) => a.next_follow_up.localeCompare(b.next_follow_up) || (a.priority || 'C').localeCompare(b.priority || 'C'))
+  const withDate = S.contacts.filter(c => c.next_follow_up).sort(byWhen)
   const overdue = withDate.filter(c => c.next_follow_up < Ts)
   const due = withDate.filter(c => c.next_follow_up === Ts)
   const week = withDate.filter(c => c.next_follow_up > Ts && c.next_follow_up <= Ws)
@@ -289,6 +300,49 @@ function contactsView() {
     el('div', { class: 'card' }, list.length ? el('ul', { class: 'list' }, list.map(c => contactRow(c))) : el('div', { class: 'empty', text: 'No matches.' })))
 }
 
+/* ---------- Buyer matching ---------- */
+const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+const countyOf = p => p.county || CITY_COUNTY[norm(p.city)] || null
+function marketHit(p, markets) {
+  const city = norm(p.city), county = norm(countyOf(p))
+  return markets.some(m => {
+    const k = norm(m).replace(/ county$/, '')
+    if (k === 'tampa bay') return ['hillsborough', 'pinellas', 'pasco', 'manatee', 'sarasota'].includes(county)
+    if (k === 'sarasota' || k === 'bradenton sarasota' || k === 'sarasota bradenton') return county === 'sarasota' || city === 'sarasota' || (k !== 'sarasota' && county === 'manatee')
+    return k === city || k === county
+  })
+}
+function typeHit(p, types) {
+  const t = norm(p.product_type)
+  if (!t) return null
+  return types.some(x => { const k = norm(x); return t === k || t.includes(k) || k.includes(t) || (k === 'medical' && t.includes('medical')) })
+}
+const inRange = (v, lo, hi) => v == null ? null : (lo == null || v >= Number(lo)) && (hi == null || v <= Number(hi))
+// Returns null (no match) or { level: 'match'|'possible', why: [...], unknown: [...] }
+function buyerMatch(p, b) {
+  if (!b || ['Dead', 'Closed'].includes(p.stage)) return null
+  if (b.contact_id && b.contact_id === p.contact_id) return null
+  const why = [], unknown = []
+  const check = (label, res, detail) => { if (res === false) return false; if (res === null) unknown.push(label); else why.push(detail); return true }
+  if ((b.markets || []).length && !check('market', marketHit(p, b.markets) ? true : false, p.city || countyOf(p))) return null
+  if ((b.product_types || []).length && !check('type', typeHit(p, b.product_types) || false, p.product_type)) return null
+  if ((b.min_sf != null || b.max_sf != null) && !check('size', inRange(p.building_sf != null ? Number(p.building_sf) : null, b.min_sf, b.max_sf), num(p.building_sf) + ' SF')) return null
+  const price = p.asking_price ?? p.est_value
+  if ((b.min_price != null || b.max_price != null) && !check('price', inRange(price != null ? Number(price) : null, b.min_price, b.max_price), moneyShort(price))) return null
+  if (!why.length) return null
+  return { level: unknown.length ? 'possible' : 'match', why, unknown }
+}
+const matchesForProp = p => S.buyers.map(b => ({ b, m: buyerMatch(p, b) })).filter(x => x.m).sort((a, c) => (a.m.level === 'match' ? 0 : 1) - (c.m.level === 'match' ? 0 : 1))
+const matchesForBuyer = b => S.props.map(p => ({ p, m: buyerMatch(p, b) })).filter(x => x.m).sort((a, c) => (a.m.level === 'match' ? 0 : 1) - (c.m.level === 'match' ? 0 : 1))
+function matchBadge(p) {
+  const ms = matchesForProp(p); if (!ms.length) return null
+  const strong = ms.filter(x => x.m.level === 'match').length
+  return el('span', { class: 'match-badge' + (strong ? '' : ' weak'), title: ms.map(x => x.b.name).join(', ') }, `${ms.length} buyer${ms.length > 1 ? 's' : ''}`)
+}
+function matchList(items, render1) {
+  return el('ul', { class: 'list' }, items.map(render1))
+}
+
 /* ---------- Pipeline ---------- */
 function propMatches(p, q) {
   if (!q) return true
@@ -305,7 +359,7 @@ function propRow(p) {
   return el('li', { class: 'item', onclick: () => openProperty(p.id) },
     el('span', { class: 'stage-dot s' + STAGES.indexOf(p.stage) }),
     el('div', { class: 'who' },
-      el('div', { class: 'name' }, propTitle(p), el('span', { class: 'stage-tag s' + STAGES.indexOf(p.stage), text: p.stage })),
+      el('div', { class: 'name' }, propTitle(p), el('span', { class: 'stage-tag s' + STAGES.indexOf(p.stage), text: p.stage }), matchBadge(p)),
       el('div', { class: 'sub', text: [c ? c.name : p.owner_of_record, propFacts(p)].filter(Boolean).join(' · ') || '—' })),
     c?.next_follow_up ? el('div', { class: 'when', text: 'Call ' + fmt(c.next_follow_up) }) : null)
 }
@@ -343,6 +397,7 @@ function pipelineView() {
           el('div', { class: 'pc-title', text: propTitle(p) }),
           c ? el('div', { class: 'pc-owner' }, el('span', { class: 'pri mini ' + (c.priority || 'C'), text: c.priority || 'C' }), c.name) : p.owner_of_record ? el('div', { class: 'pc-owner muted', text: p.owner_of_record }) : null,
           propFacts(p) ? el('div', { class: 'pc-facts', text: propFacts(p) }) : null,
+          matchBadge(p),
           el('div', { class: 'pc-foot' }, c?.next_follow_up ? el('span', { class: 'muted', text: 'Call ' + fmt(c.next_follow_up) }) : el('span'), sel))
       }),
       cards.length ? null : el('div', { class: 'col-empty', text: 'Drag a card here' }))
@@ -360,11 +415,11 @@ function calendarView() {
   const grid = el('div', { class: 'grid' }, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => el('div', { class: 'dow', text: d })))
   for (let i = 0; i < 42; i++) {
     const d = new Date(start); d.setDate(start.getDate() + i); const k = ymd(d)
-    const evs = (byDay[k] || []).sort((a, b) => (a.priority || 'C').localeCompare(b.priority || 'C'))
+    const evs = (byDay[k] || []).sort(byWhen)
     grid.append(el('div', { class: 'cell' + (d.getMonth() !== m.getMonth() ? ' out' : '') + (k === T ? ' today' : '') },
       el('div', { class: 'd', text: d.getDate() }),
       evs.map(c => el('div', { class: 'ev', title: `${c.name} — ${c.next_note || ''}`, onclick: () => openContact(c.id) },
-        el('span', { class: 'dot', style: `background:var(--${(c.priority || 'c').toLowerCase()})` }), el('span', { class: 'nm', text: c.name })))))
+        el('span', { class: 'dot', style: `background:var(--${(c.priority || 'c').toLowerCase()})` }), el('span', { class: 'nm', text: (c.next_time ? fmtTime(c.next_time).replace(':00', '').replace(' ', '').toLowerCase() + ' ' : '') + c.name })))))
   }
   const shift = n => { S.calMonth = new Date(m.getFullYear(), m.getMonth() + n, 1); render() }
   return el('div', null,
@@ -386,12 +441,16 @@ function mapView() {
     esri.tiledMapLayer({ url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer', maxZoom: 21, maxNativeZoom: 19 }).addTo(MAP.map)
     esri.tiledMapLayer({ url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer', maxZoom: 21, maxNativeZoom: 19, opacity: .7 }).addTo(MAP.map)
     esri.tiledMapLayer({ url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer', maxZoom: 21, maxNativeZoom: 19 }).addTo(MAP.map)
-    MAP.parcels = esri.featureLayer({
-      url: PARCELS_URL, minZoom: 16, fields: ['OBJECTID'], simplifyFactor: 0.35, precision: 6,
-      style: () => ({ color: '#ffd84d', weight: 1.2, fill: true, fillOpacity: 0, opacity: .9 }),
-    })
-    MAP.parcels.on('click', e => { if (MAP.placing) return; showParcel(e.layer.feature.properties.OBJECTID, e.latlng) })
+    MAP.parcels = L.layerGroup(COUNTY_LAYERS.map(c => {
+      const fl = esri.featureLayer({
+        url: `${PARCEL_SVC}/${c.id}`, minZoom: 16, fields: ['OBJECTID'], simplifyFactor: 0.35, precision: 6,
+        style: () => ({ color: '#ffd84d', weight: 1.2, fill: true, fillOpacity: 0, opacity: .9 }),
+      })
+      fl.on('click', e => { if (MAP.placing || PROS.drawing) return; showParcel(c.id, e.layer.feature.id ?? e.layer.feature.properties.OBJECTID, e.latlng) })
+      return fl
+    }))
     MAP.parcels.addTo(MAP.map)
+    MAP.prospectLayer = L.layerGroup().addTo(MAP.map)
     MAP.pinsLayer = L.layerGroup().addTo(MAP.map)
     MAP.propsLayer = L.layerGroup().addTo(MAP.map)
     MAP.map.on('click', e => { if (MAP.placing) finishPlacing(e.latlng) })
@@ -404,8 +463,10 @@ function mapView() {
     toggle('Parcel lines', 'showParcels', () => { MAP.showParcels ? MAP.parcels.addTo(MAP.map) : MAP.parcels.remove(); paintMapHint() }),
     toggle('Saved pins', 'showPins', () => { MAP.showPins ? MAP.pinsLayer.addTo(MAP.map) : MAP.pinsLayer.remove() }),
     toggle('Show dead', 'showDead', refreshMap),
+    el('button', { class: 'chip' + (PROS.open ? ' on accent' : ' accent'), onclick: () => { PROS.open = !PROS.open; render() } }, 'Prospect an area'),
     el('button', { class: 'chip', onclick: () => fitAll() }, 'Fit all'),
     el('span', { class: 'chip hint', style: 'cursor:default' })))
+  if (PROS.open) wrap.append(prospectPanel())
   wrap.append(el('div', { class: 'card legend' },
     el('div', null, el('span', { class: 'sw', style: 'background:var(--a)' }), 'A owner — every 2 weeks'),
     el('div', null, el('span', { class: 'sw', style: 'background:var(--b)' }), 'B owner — monthly'),
@@ -413,7 +474,7 @@ function mapView() {
     el('div', null, el('span', { class: 'sw ring' }), 'Active deal (meeting → contract)'),
     el('div', null, el('span', { class: 'sw', style: 'background:#7a7f87;border-radius:3px' }), 'Saved pin (no owner yet)')))
   const unplaced = S.props.filter(p => p.lat == null)
-  if (unplaced.length) wrap.append(el('div', { class: 'card unplaced' },
+  if (unplaced.length && !PROS.open) wrap.append(el('div', { class: 'card unplaced' },
     el('h4', { text: `Not on the map yet (${unplaced.length})` }),
     el('div', { class: 'muted', style: 'font-size:12px', text: LOC.busy ? 'Looking up addresses…' : 'Click one, then click its building on the map.' }),
     unplaced.map(p => el('button', { class: 'btn small', onclick: () => startPlacing(p) }, `${propTitle(p)}${contactById(p.contact_id) ? ' — ' + contactById(p.contact_id).name : ''}`))))
@@ -483,36 +544,167 @@ function pinPopup(p) {
       el('button', { class: 'btn small', onclick: async () => { const { error } = await sb.from('pins').delete().eq('id', p.id); if (error) toast(error.message); else { MAP.map.closePopup(); await loadTable('pins'); refreshMap() } } }, 'Remove')))
 }
 
+/* ---------- Map prospecting ---------- */
+const PROS = { open: false, drawing: false, busy: false, types: new Set(['Office', 'Medical office']), minSf: '', results: null, selected: new Set(), msg: '', rect: null }
+const PROS_FIELDS = 'OBJECTID,PARCELID,PARNO,SITEADD,SCITY,SZIP,OWNNAME,MAILADD,MCITY,MSTATE,MZIP,PARUSECODE,PARUSEDESC,DORUSECODE,TOT_LVG_AREA,YRBLT_ACT,PARVAL,ASSD_TOT,SALE1_AMT,SALE1_DATE,SALE1_YEAR,ZONING,ACRES,PALINK,PAWEBPAGE,CNTYNAME'
+function prospectPanel() {
+  const minSf = el('input', { type: 'number', placeholder: 'Any', value: PROS.minSf, oninput: e => { PROS.minSf = e.target.value } })
+  const r = PROS.results
+  const inCrm = row => S.props.some(p => p.parcel_id && p.parcel_id === row.pf.parcel_id)
+  const panel = el('div', { class: 'card prospect' },
+    el('div', { class: 'pros-head' }, el('h4', { text: 'Prospect an area' }), el('button', { class: 'btn small ghost', onclick: () => { PROS.open = false; clearProspect(); render() } }, '✕')),
+    el('div', { class: 'pros-types' }, PRODUCT_TYPES.filter(t => t !== 'Other').map(t => el('button', { class: 'chip small' + (PROS.types.has(t) ? ' on' : ''), onclick: () => { PROS.types.has(t) ? PROS.types.delete(t) : PROS.types.add(t); render() } }, t))),
+    el('label', { class: 'f' }, 'Min building SF', minSf),
+    el('div', { class: 'actions' },
+      el('button', { class: 'btn small primary', disabled: PROS.busy, onclick: startDraw }, PROS.drawing ? 'Drag on the map…' : 'Draw a box'),
+      el('button', { class: 'btn small', disabled: PROS.busy, onclick: () => runProspect(MAP.map.getBounds()) }, 'Search this view')),
+    PROS.msg ? el('div', { class: 'muted pros-msg', text: PROS.msg }) : null)
+  if (r && r.length) {
+    const sel = r.filter(x => PROS.selected.has(x.key))
+    const all = el('input', { type: 'checkbox', checked: sel.length === r.length, onchange: e => { PROS.selected = e.target.checked ? new Set(r.map(x => x.key)) : new Set(); render() } })
+    panel.append(
+      el('div', { class: 'pros-bar' }, el('label', { class: 'chk' }, all, `${r.length} parcels · ${new Set(r.map(x => x.pf.owner_of_record)).size} owners`)),
+      el('div', { class: 'actions' },
+        el('button', { class: 'btn small primary', disabled: !sel.length, onclick: () => addProspects(sel) }, `Add ${sel.length} to pipeline`),
+        el('button', { class: 'btn small', onclick: () => downloadCsv(sel.length ? sel : r) }, `Call list CSV (${sel.length || r.length})`),
+        el('button', { class: 'btn small ghost', onclick: () => { clearProspect(); render() } }, 'Clear')),
+      el('ul', { class: 'pros-list' }, r.map(x => el('li', { class: PROS.selected.has(x.key) ? 'on' : '' },
+        el('input', { type: 'checkbox', checked: PROS.selected.has(x.key), onchange: e => { e.target.checked ? PROS.selected.add(x.key) : PROS.selected.delete(x.key); render({ soft: true }) } }),
+        el('div', { class: 'pr-body', onclick: () => { const c = x.center; if (c) { MAP.map.setView([c.lat, c.lng], 18); L.popup({ maxWidth: 320 }).setLatLng([c.lat, c.lng]).setContent(parcelPopup(x.f, c)).openOn(MAP.map) } } },
+          el('div', { class: 'pr-addr' }, x.pf._site || '(no site address)', inCrm(x) ? el('span', { class: 'tag Buyer', text: 'In CRM' }) : null),
+          el('div', { class: 'pr-owner', text: x.pf.owner_of_record || '—' }),
+          el('div', { class: 'pr-sub', text: [x.pf.use_code, x.pf.building_sf ? num(x.pf.building_sf) + ' SF' : null, x.pf.year_built ? 'built ' + x.pf.year_built : null, x.pf.just_value ? moneyShort(x.pf.just_value) : null].filter(Boolean).join(' · ') }),
+          x.pf.owner_mailing ? el('div', { class: 'pr-sub', text: 'Mail: ' + x.pf.owner_mailing }) : null)))))
+  } else if (r) panel.append(el('div', { class: 'muted', style: 'font-size:13px;margin-top:8px', text: 'No matching parcels here. Try more property types or a bigger area.' }))
+  return panel
+}
+function clearProspect() { PROS.results = null; PROS.selected = new Set(); PROS.msg = ''; MAP.prospectLayer?.clearLayers() }
+function startDraw() {
+  if (PROS.drawing) return
+  PROS.drawing = true; render()
+  const map = MAP.map, node = MAP.node
+  map.dragging.disable(); map.boxZoom?.disable(); node.classList.add('drawing')
+  let start = null, rect = null
+  const down = e => { start = map.mouseEventToLatLng(e); rect = L.rectangle([start, start], { color: '#e8b04b', weight: 2, dashArray: '6 4', fillOpacity: .08 }).addTo(MAP.prospectLayer); try { node.setPointerCapture(e.pointerId) } catch { } e.preventDefault() }
+  const move = e => { if (start) rect.setBounds(L.latLngBounds(start, map.mouseEventToLatLng(e))) }
+  const up = e => {
+    node.removeEventListener('pointerdown', down); node.removeEventListener('pointermove', move); node.removeEventListener('pointerup', up)
+    map.dragging.enable(); map.boxZoom?.enable(); node.classList.remove('drawing'); PROS.drawing = false
+    if (!start) { render(); return }
+    const b = L.latLngBounds(start, map.mouseEventToLatLng(e))
+    if (b.getNorth() - b.getSouth() < 0.0003 && b.getEast() - b.getWest() < 0.0003) { rect.remove(); render(); return }
+    runProspect(b, rect)
+  }
+  node.addEventListener('pointerdown', down); node.addEventListener('pointermove', move); node.addEventListener('pointerup', up)
+}
+async function runProspect(bounds, rect) {
+  const h = bounds.getNorth() - bounds.getSouth(), w = bounds.getEast() - bounds.getWest()
+  if (h * w > 0.0016) { PROS.msg = 'That area is too big — zoom in or draw a smaller box (about 2–3 miles across max).'; rect?.remove(); render(); return }
+  if (!PROS.types.size) { PROS.msg = 'Pick at least one property type.'; render(); return }
+  MAP.prospectLayer.clearLayers(); if (rect) rect.addTo(MAP.prospectLayer)
+  PROS.busy = true; PROS.msg = 'Searching county parcel records…'; PROS.results = null; PROS.selected = new Set(); render()
+  const env = `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`
+  const feats = []
+  try {
+    await Promise.all(COUNTY_LAYERS.map(async c => {
+      for (let off = 0, page = 0; page < 8; page++, off += 1000) {
+        const { features, more } = await queryLayer(c.id, { geometry: env, geometryType: 'esriGeometryEnvelope', outFields: PROS_FIELDS, maxAllowableOffset: '0.00002', resultOffset: String(off), resultRecordCount: '1000' })
+        feats.push(...features)
+        if (!more || !features.length) break
+      }
+    }))
+  } catch (e) { PROS.busy = false; PROS.msg = 'Parcel search failed: ' + e.message; render(); return }
+  const minSf = Number(PROS.minSf) || 0, seen = new Set(), out = []
+  for (const f of feats) {
+    const pf = parcelFields(f)
+    if (!pf._type || !PROS.types.has(pf._type)) continue
+    if (minSf && !(pf.building_sf >= minSf)) continue
+    const key = pf.parcel_id || f._layer + ':' + f.attributes.OBJECTID
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ key, f, pf, center: parcelCenter(f) })
+  }
+  out.sort((a, b) => String(a.pf.owner_of_record).localeCompare(String(b.pf.owner_of_record)))
+  for (const x of out) {
+    const poly = L.polygon(x.f.geometry.rings.map(r => r.map(([lng, lat]) => [lat, lng])), { color: '#ff8a3d', weight: 2, fillOpacity: .18 })
+    poly.bindTooltip(`${x.pf._site} — ${x.pf.owner_of_record || ''}`)
+    poly.on('click', e => { L.DomEvent.stopPropagation(e); L.popup({ maxWidth: 320 }).setLatLng(e.latlng).setContent(parcelPopup(x.f, e.latlng)).openOn(MAP.map) })
+    poly.addTo(MAP.prospectLayer)
+  }
+  PROS.busy = false
+  PROS.results = out
+  PROS.selected = new Set(out.filter(x => !S.props.some(p => p.parcel_id && p.parcel_id === x.pf.parcel_id)).map(x => x.key))
+  PROS.msg = feats.length ? `Checked ${feats.length.toLocaleString()} parcels.` : 'No parcels found in that area (outside Sarasota, Manatee, Charlotte, Pinellas and Hillsborough?).'
+  render()
+}
+async function addProspects(rows) {
+  const fresh = rows.filter(x => !S.props.some(p => p.parcel_id && p.parcel_id === x.pf.parcel_id))
+  if (!fresh.length) { toast('All selected parcels are already in your pipeline'); return }
+  const payload = fresh.map(x => { const s = parcelSeed(x.f); delete s.stage_updated_at; return { ...s, stage: 'Prospect', location_note: 'Added from map prospecting', notes: null } })
+  const { error } = await sb.from('properties').insert(payload)
+  if (error) { toast(error.message); return }
+  await loadTable('properties'); PROS.selected = new Set(); render(); toast(`${fresh.length} added to Pipeline → Prospect`)
+}
+function downloadCsv(rows) {
+  const cols = [['Owner', x => x.pf.owner_of_record], ['Mailing address', x => x.f.attributes.MAILADD], ['Mailing city', x => x.f.attributes.MCITY], ['Mailing state', x => x.f.attributes.MSTATE], ['Mailing zip', x => x.f.attributes.MZIP],
+    ['Property address', x => x.pf._site], ['Property city', x => x.pf._city], ['Property zip', x => x.pf._zip], ['County', x => x.pf.county], ['Use', x => x.pf.use_code], ['Building SF', x => x.pf.building_sf], ['Year built', x => x.pf.year_built],
+    ['Value', x => x.pf.just_value], ['Last sale price', x => x.pf.last_sale_price], ['Last sale date', x => x.pf.last_sale_date], ['Zoning', x => x.pf.zoning], ['Parcel ID', x => x.pf.parcel_id], ['Appraiser link', x => x.pf.pa_link]]
+  const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v }
+  const csv = [cols.map(c => c[0]).join(','), ...rows.map(x => cols.map(c => q(c[1](x))).join(','))].join('\n')
+  const a = el('a', { href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), download: `call-list-${ymd(today())}.csv` })
+  document.body.append(a); a.click(); a.remove()
+}
+
 /* ---------- Parcel data ---------- */
-async function queryParcels(extra) {
-  const params = new URLSearchParams({ where: '1=1', outFields: '*', returnGeometry: 'true', outSR: '4326', geometryPrecision: '6', f: 'json', inSR: '4326', spatialRel: 'esriSpatialRelIntersects', ...extra })
-  const r = await fetch(PARCELS_URL + '/query?' + params)
+async function queryLayer(layerId, extra) {
+  const params = new URLSearchParams({ where: '1=1', outFields: '*', returnGeometry: 'true', outSR: '4326', f: 'json', inSR: '4326', spatialRel: 'esriSpatialRelIntersects', ...extra })
+  const r = await fetch(`${PARCEL_SVC}/${layerId}/query?` + params)
   const j = await r.json()
   if (j.error) throw new Error(j.error.message)
-  return j.features || []
+  const county = COUNTY_LAYERS.find(c => c.id === layerId)?.name
+  return { features: (j.features || []).map(f => (f._layer = layerId, f._county = county, f)), more: !!j.exceededTransferLimit }
 }
-const parcelsAtPoint = ll => queryParcels({ geometry: `${ll.lng},${ll.lat}`, geometryType: 'esriGeometryPoint' })
-const parcelsNear = (ll, d = 0.0007) => queryParcels({ geometry: `${ll.lng - d},${ll.lat - d},${ll.lng + d},${ll.lat + d}`, geometryType: 'esriGeometryEnvelope' })
-const parcelsById = oid => queryParcels({ where: 'OBJECTID=' + Number(oid) })
+async function queryAllCounties(extra) {
+  const res = await Promise.allSettled(COUNTY_LAYERS.map(c => queryLayer(c.id, extra)))
+  return res.flatMap(r => r.status === 'fulfilled' ? r.value.features : [])
+}
+const parcelsAtPoint = ll => queryAllCounties({ geometry: `${ll.lng},${ll.lat}`, geometryType: 'esriGeometryPoint' })
+const parcelsNear = (ll, d = 0.0007) => queryAllCounties({ geometry: `${ll.lng - d},${ll.lat - d},${ll.lng + d},${ll.lat + d}`, geometryType: 'esriGeometryEnvelope' })
+const parcelsById = async (layerId, oid) => (await queryLayer(layerId, { where: 'OBJECTID=' + Number(oid) })).features
 function parcelCenter(f) {
   const ring = f.geometry?.rings?.[0]; if (!ring) return null
   let x = 0, y = 0; for (const [a, b] of ring) { x += a; y += b }
   return { lat: y / ring.length, lng: x / ring.length }
 }
+function dorCode(a) {
+  let n = a.DORUSECODE != null ? Number(a.DORUSECODE) : parseInt(a.PARUSECODE || a.DOR4CODE, 10)
+  if (isNaN(n)) return null
+  if (n > 99) n = Math.floor(n / 100)
+  return n
+}
+function saleDate(s) {
+  if (!s) return null
+  s = String(s)
+  if (/^\d{8}$/.test(s)) return `${s.slice(4, 6)}/${s.slice(0, 4)}`
+  if (/^\d{13}$/.test(s)) { const d = new Date(Number(s)); return `${pad(d.getMonth() + 1)}/${d.getFullYear()}` }
+  const d = new Date(s); return isNaN(d) ? s : `${pad(d.getMonth() + 1)}/${d.getFullYear()}`
+}
 function parcelFields(f) {
-  const a = f.attributes, use = dorInfo(a.DOR_UC), c = parcelCenter(f)
+  const a = f.attributes, code = dorCode(a), use = code != null ? dorInfo(code) : null, c = parcelCenter(f)
+  const desc = a.PARUSEDESC ? String(a.PARUSEDESC).trim() : null
   return {
-    parcel_id: a.PARCEL_ID || null,
-    building_sf: a.TOT_LVG_AR || null, lot_sf: a.LND_SQFOOT || null, year_built: a.ACT_YR_BLT || null,
-    just_value: a.JV || null, last_sale_price: a.SALE_PRC1 || null,
-    last_sale_date: a.SALE_YR1 ? `${a.SALE_MO1 ? pad(a.SALE_MO1) + '/' : ''}${a.SALE_YR1}` : null,
-    use_code: use ? `${pad(use.code)} — ${use.label}` : null, _type: use?.type || null,
-    owner_of_record: a.OWN_NAME || null,
-    owner_mailing: [a.OWN_ADDR1, a.OWN_CITY, a.OWN_STATE, a.OWN_ZIPCD].filter(Boolean).join(', ') || null,
+    parcel_id: a.PARCELID || a.PARNO || null,
+    building_sf: a.TOT_LVG_AREA || null, lot_sf: a.ACRES ? Math.round(a.ACRES * 43560) : null, year_built: a.YRBLT_ACT || null,
+    just_value: a.PARVAL || a.ASSD_TOT || null, last_sale_price: a.SALE1_AMT || null, last_sale_date: saleDate(a.SALE1_DATE) || (a.SALE1_YEAR ? String(a.SALE1_YEAR) : null),
+    use_code: code != null ? `${pad(code)} — ${desc || use?.label || ''}`.replace(/ — $/, '') : desc, _type: use?.type || null, _dor: code,
+    owner_of_record: a.OWNNAME || a.OWNERNAME || null,
+    owner_mailing: [a.MAILADD || a.OWNERADD1, a.MCITY || a.OWNERCITY, a.MSTATE || a.OWNERSTATE, a.MZIP || a.OWNERZIP].filter(Boolean).join(', ') || null,
+    zoning: a.ZONING || null, pa_link: a.PALINK || a.PAWEBPAGE || null, county: f._county || a.CNTYNAME || null,
     ...(c ? { lat: c.lat, lng: c.lng } : {}),
-    _addr: [a.PHY_ADDR1, a.PHY_CITY].filter(Boolean).join(', '),
+    _addr: [a.SITEADD || a.SITUSADD1, a.SCITY].filter(Boolean).join(', '), _site: a.SITEADD || a.SITUSADD1 || '', _city: a.SCITY || null, _zip: a.SZIP || null,
   }
 }
+const stripPrivate = o => Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith('_')))
 // Pick the parcel near a point whose situs address matches the street number (and street name when possible)
 function pickParcel(features, address) {
   const m = String(address || '').toUpperCase().match(/^\s*(\d+)(?:\s*-\s*\d+)?\s+([A-Z0-9]+)(?:\s+([A-Z0-9]+))?/)
@@ -520,41 +712,50 @@ function pickParcel(features, address) {
   const [, numStr, w1, w2] = m
   const dirs = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW'])
   const word = dirs.has(w1) && w2 ? w2 : w1
-  const cands = features.filter(f => String(f.attributes.PHY_ADDR1 || '').toUpperCase().startsWith(numStr + ' '))
-  return cands.find(f => String(f.attributes.PHY_ADDR1).toUpperCase().includes(' ' + word)) || cands[0] || null
+  const site = f => String(f.attributes.SITEADD || f.attributes.SITUSADD1 || '').toUpperCase()
+  const cands = features.filter(f => site(f).startsWith(numStr + ' '))
+  return cands.find(f => site(f).includes(' ' + word)) || cands[0] || null
 }
-async function showParcel(oid, latlng) {
+async function showParcel(layerId, oid, latlng) {
   const pop = L.popup({ maxWidth: 320 }).setLatLng(latlng).setContent('<div class="pop">Loading parcel…</div>').openOn(MAP.map)
   try {
-    const [f] = await parcelsById(oid)
+    const [f] = await parcelsById(layerId, oid)
     if (!f) { pop.setContent('Parcel not found.'); return }
-    const a = f.attributes, pf = parcelFields(f)
-    const addr = [a.PHY_ADDR1, a.PHY_CITY, 'FL', a.PHY_ZIPCD].filter(Boolean).join(', ')
-    const existing = S.props.find(p => p.parcel_id && p.parcel_id === a.PARCEL_ID)
-    const seed = { address: a.PHY_ADDR1 || addr, city: a.PHY_CITY || null, address_query: addr, ...pf, product_type: pf._type, stage: 'Prospect', parcel_checked_at: nowIso() }
-    pop.setContent(el('div', { class: 'pop' },
-      el('h3', { text: a.PHY_ADDR1 || 'Parcel' }),
-      el('div', { class: 'muted', text: a.PHY_CITY || '' }),
-      el('dl', null,
-        el('dt', { text: 'Owner' }), el('dd', { text: pf.owner_of_record || '—' }),
-        pf.owner_mailing ? [el('dt', { text: 'Mailing' }), el('dd', { text: pf.owner_mailing })] : null,
-        el('dt', { text: 'Use' }), el('dd', { text: pf.use_code || '—' }),
-        el('dt', { text: 'Building' }), el('dd', { text: pf.building_sf ? `${num(pf.building_sf)} SF${pf.year_built ? ', built ' + pf.year_built : ''}` : '—' }),
-        el('dt', { text: 'Lot' }), el('dd', { text: pf.lot_sf ? num(pf.lot_sf) + ' SF' : '—' }),
-        el('dt', { text: 'Just value' }), el('dd', { text: money(pf.just_value) }),
-        el('dt', { text: 'Last sale' }), el('dd', { text: pf.last_sale_price ? `${money(pf.last_sale_price)} (${pf.last_sale_date || '?'})` : '—' }),
-        el('dt', { text: 'Parcel ID' }), el('dd', { text: pf.parcel_id || '—' })),
-      el('div', { class: 'actions' },
-        existing ? el('button', { class: 'btn small primary', onclick: () => openProperty(existing.id) }, 'Open property') :
-          el('button', { class: 'btn small primary', onclick: () => { MAP.map.closePopup(); openPropertyForm(seed) } }, 'Add to pipeline'),
-        existing ? null : el('button', { class: 'btn small', onclick: async e => {
-          e.target.disabled = true
-          const c = parcelCenter(f) || latlng
-          const { error } = await sb.from('pins').insert({ name: a.PHY_ADDR1 || 'Parcel', address: addr, lat: c.lat, lng: c.lng, parcel_id: a.PARCEL_ID, owner_name: a.OWN_NAME, pin_type: 'prospect' })
-          if (error) { toast(error.message); e.target.disabled = false } else { toast('Pin saved'); MAP.map.closePopup(); await loadTable('pins'); refreshMap() }
-        } }, 'Save pin'),
-        el('a', { class: 'btn small', href: mapsHref(addr), target: '_blank', rel: 'noopener' }, 'Google Maps'))))
+    pop.setContent(parcelPopup(f, latlng))
   } catch (e) { pop.setContent('Couldn’t load parcel: ' + esc(e.message)) }
+}
+function parcelSeed(f) {
+  const pf = parcelFields(f)
+  return { address: pf._site, city: pf._city, address_query: [pf._site, pf._city, 'FL', pf._zip].filter(Boolean).join(', '), ...stripPrivate(pf), product_type: pf._type, stage: 'Prospect', parcel_checked_at: nowIso() }
+}
+function parcelPopup(f, latlng) {
+  const pf = parcelFields(f)
+  const addr = [pf._site, pf._city, 'FL', pf._zip].filter(Boolean).join(', ')
+  const existing = S.props.find(p => p.parcel_id && p.parcel_id === pf.parcel_id)
+  return el('div', { class: 'pop' },
+    el('h3', { text: pf._site || 'Parcel' }),
+    el('div', { class: 'muted', text: [pf._city, pf.county && pf.county + ' County'].filter(Boolean).join(' · ') }),
+    el('dl', null,
+      el('dt', { text: 'Owner' }), el('dd', { text: pf.owner_of_record || '—' }),
+      pf.owner_mailing ? [el('dt', { text: 'Mailing' }), el('dd', { text: pf.owner_mailing })] : null,
+      el('dt', { text: 'Use' }), el('dd', { text: pf.use_code || '—' }),
+      el('dt', { text: 'Zoning' }), el('dd', { text: pf.zoning || '—' }),
+      el('dt', { text: 'Building' }), el('dd', { text: pf.building_sf ? `${num(pf.building_sf)} SF${pf.year_built ? ', built ' + pf.year_built : ''}` : '—' }),
+      el('dt', { text: 'Lot' }), el('dd', { text: pf.lot_sf ? `${num(pf.lot_sf)} SF` : '—' }),
+      el('dt', { text: 'Value' }), el('dd', { text: money(pf.just_value) }),
+      el('dt', { text: 'Last sale' }), el('dd', { text: pf.last_sale_price ? `${money(pf.last_sale_price)} (${pf.last_sale_date || '?'})` : '—' }),
+      el('dt', { text: 'Parcel ID' }), el('dd', { text: pf.parcel_id || '—' })),
+    el('div', { class: 'actions' },
+      existing ? el('button', { class: 'btn small primary', onclick: () => openProperty(existing.id) }, 'Open property') :
+        el('button', { class: 'btn small primary', onclick: () => { MAP.map.closePopup(); openPropertyForm(parcelSeed(f)) } }, 'Add to pipeline'),
+      existing ? null : el('button', { class: 'btn small', onclick: async e => {
+        e.target.disabled = true
+        const c = parcelCenter(f) || latlng
+        const { error } = await sb.from('pins').insert({ name: pf._site || 'Parcel', address: addr, lat: c.lat, lng: c.lng, parcel_id: pf.parcel_id, owner_name: pf.owner_of_record, pin_type: 'prospect' })
+        if (error) { toast(error.message); e.target.disabled = false } else { toast('Pin saved'); MAP.map.closePopup(); await loadTable('pins'); refreshMap() }
+      } }, 'Save pin'),
+      pf.pa_link ? el('a', { class: 'btn small', href: pf.pa_link, target: '_blank', rel: 'noopener' }, 'Appraiser') : null,
+      el('a', { class: 'btn small', href: mapsHref(addr), target: '_blank', rel: 'noopener' }, 'Google Maps')))
 }
 function startPlacing(p) {
   MAP.placing = p
@@ -567,7 +768,7 @@ async function finishPlacing(latlng) {
   let patch = { lat: latlng.lat, lng: latlng.lng, location_note: 'Placed by hand on map', updated_at: nowIso() }
   try {
     const [f] = await parcelsAtPoint(latlng)
-    if (f) { const pf = parcelFields(f); delete pf._addr; if (!p.product_type && pf._type) patch.product_type = pf._type; delete pf._type; patch = { ...patch, ...pf, lat: latlng.lat, lng: latlng.lng, parcel_checked_at: nowIso() } }
+    if (f) { const pf = parcelFields(f); if (!p.product_type && pf._type) patch.product_type = pf._type; patch = { ...patch, ...stripPrivate(pf), lat: latlng.lat, lng: latlng.lng, parcel_checked_at: nowIso() } }
   } catch { }
   const { error } = await sb.from('properties').update(patch).eq('id', p.id)
   if (error) toast(error.message); else { Object.assign(p, patch); toast(`${p.address} placed`) }
@@ -587,10 +788,11 @@ async function enrich(p) {
   const patch = { parcel_checked_at: nowIso(), updated_at: nowIso() }
   try {
     const feats = await parcelsNear({ lat: p.lat, lng: p.lng })
-    const f = pickParcel(feats, p.address_query || p.address) || (p.parcel_id && feats.find(x => x.attributes.PARCEL_ID === p.parcel_id))
+    const f = pickParcel(feats, p.address_query || p.address) || (p.parcel_id && feats.find(x => (x.attributes.PARCELID || x.attributes.PARNO) === p.parcel_id))
     if (f) {
       const pf = parcelFields(f)
-      for (const k of Object.keys(pf)) if (!k.startsWith('_') && pf[k] != null && (p[k] == null || ['lat', 'lng', 'just_value', 'last_sale_price', 'last_sale_date', 'owner_of_record', 'owner_mailing', 'use_code'].includes(k))) patch[k] = pf[k]
+      const always = ['lat', 'lng', 'just_value', 'last_sale_price', 'last_sale_date', 'owner_of_record', 'owner_mailing', 'use_code', 'zoning', 'pa_link', 'county', 'building_sf', 'lot_sf', 'year_built', 'parcel_id']
+      for (const [k, v] of Object.entries(stripPrivate(pf))) if (v != null && (p[k] == null || always.includes(k))) patch[k] = v
       if (!p.product_type && pf._type) patch.product_type = pf._type
       patch.location_note = 'Matched to parcel ' + pf.parcel_id + ' (' + pf._addr + ')'
     }
@@ -647,10 +849,10 @@ function refreshDrawer(fresh) {
 const markDirty = e => { e.target.dataset.dirty = '1' }
 
 /* ---------- Logging calls ---------- */
-async function logCall(c, { note, talked, priority, next, nextNote, meeting }) {
+async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting }) {
   const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note })
   if (e1) throw e1
-  const patch = { priority, next_follow_up: next || null, next_note: nextNote || null, updated_at: nowIso() }
+  const patch = { priority, next_follow_up: next || null, next_time: nextTime || null, next_note: nextNote || null, updated_at: nowIso() }
   if (!c.last_contact || c.last_contact <= talked) patch.last_contact = talked
   const { error: e2 } = await sb.from('contacts').update(patch).eq('id', c.id)
   if (e2) throw e2
@@ -666,7 +868,7 @@ function outcomeBar(c, notesField) {
     btn.disabled = true
     try {
       const note = extra() ? `${label} — ${extra()}` : label
-      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextNote: opts.nextNote, meeting: opts.meeting })
+      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting })
       toast(`${label} logged · next call ${fmt(ymd(opts.next), { weekday: 'short', month: 'short', day: 'numeric' })}`)
       render({ soft: true }); refreshDrawer(true)
     } catch (x) { toast('Couldn’t save: ' + (x.message || x)); btn.disabled = false }
@@ -685,7 +887,7 @@ function outcomeBar(c, notesField) {
     el('button', { class: 'btn primary small', onclick: e => {
       const t = mTime.value ? new Date('1970-01-01T' + mTime.value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
       const when = `${fmt(mDate.value, { weekday: 'short', month: 'short', day: 'numeric' })}${t ? ' at ' + t : ''}${mWhere.value.trim() ? ' — ' + mWhere.value.trim() : ''}`
-      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextNote: 'MEETING ' + when, meeting: true })
+      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextTime: mTime.value || null, nextNote: 'MEETING ' + when, meeting: true })
     } }, 'Save meeting'))
   return el('div', null, bar, meetBox)
 }
@@ -700,13 +902,14 @@ function contactDetail(c) {
   const recalc = () => { nextDate.value = ymd(addCadence(parse(talked.value) || today(), pri.value)) }
   pri.addEventListener('change', recalc); talked.addEventListener('change', recalc)
   const nextStep = el('input', { type: 'text', placeholder: 'What to do on that call', oninput: markDirty })
+  const nextTime = el('input', { type: 'time', oninput: markDirty })
   const logErr = el('div', { class: 'err' })
   const save = el('button', { class: 'btn primary' }, 'Save conversation')
   save.onclick = async () => {
     if (!notes.value.trim()) { logErr.textContent = 'Add a note about the conversation.'; return }
     save.disabled = true; logErr.textContent = ''
     try {
-      await logCall(c, { note: notes.value.trim(), talked: talked.value, priority: pri.value, next: nextDate.value, nextNote: nextStep.value.trim() })
+      await logCall(c, { note: notes.value.trim(), talked: talked.value, priority: pri.value, next: nextDate.value, nextTime: nextTime.value, nextNote: nextStep.value.trim() })
       toast('Conversation saved'); render({ soft: true }); refreshDrawer(true)
     } catch (x) { logErr.textContent = 'Couldn’t save: ' + (x.message || x); save.disabled = false }
   }
@@ -716,12 +919,14 @@ function contactDetail(c) {
       c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,
       el('span', { class: 'muted', style: 'font-size:13px', text: (CADENCE[c.priority] || CADENCE.C).label + ' follow-up' }),
       tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + c.phone) : null),
-    el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Next call' }), el('b', { text: fmt(c.next_follow_up, LONG) }), c.next_note ? el('div', { text: c.next_note }) : null),
+    el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Next call' }), el('b', { text: fmt(c.next_follow_up, LONG) + (c.next_follow_up ? ' · ' + (c.next_time ? fmtTime(c.next_time) : 'first call block') : '') }), c.next_note ? el('div', { text: c.next_note }) : null),
     el('div', { class: 'section-title', text: 'How did the call go?' }),
     outcomeBar(c, notes),
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
     el('button', { class: 'btn small', style: 'margin-top:8px', onclick: () => openPropertyForm({ contact_id: c.id, city: c.city, stage: 'Contacted' }) }, '+ Add a property'),
+    S.buyers.filter(b => b.contact_id === c.id).map(buyerPropsSection),
+    docsSection(c, 'contacts'),
     el('dl', { class: 'facts' },
       el('dt', { text: 'Phone' }), el('dd', null, tel ? el('a', { href: tel, text: c.phone }) : '—', c.phone_note ? el('span', { class: 'muted', text: ' · ' + c.phone_note }) : null),
       c.email ? [el('dt', { text: 'Email' }), el('dd', null, el('a', { href: 'mailto:' + c.email, text: c.email }))] : null,
@@ -733,7 +938,7 @@ function contactDetail(c) {
       el('label', { class: 'f' }, 'Date you talked', talked),
       el('label', { class: 'f' }, 'Notes', notes),
       el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Next call', nextDate)),
-      el('label', { class: 'f' }, 'Next step', nextStep),
+      el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next step', nextStep), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
       logErr, el('div', { class: 'actions' }, save)),
     el('h4', { text: `Conversation history (${hist.length})` }),
     hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', null, el('div', { class: 'date', text: fmt(v.talked_on, LONG) }), el('div', { class: 'txt', text: v.notes }))))
@@ -771,6 +976,7 @@ function propertyDetail(p) {
       el('dt', { text: 'Lot' }), el('dd', { text: p.lot_sf ? `${num(p.lot_sf)} SF (${(p.lot_sf / 43560).toFixed(2)} ac)` : '—' }),
       el('dt', { text: 'Year built' }), el('dd', { text: p.year_built || '—' }),
       el('dt', { text: 'Use' }), el('dd', { text: p.use_code || '—' }),
+      el('dt', { text: 'Zoning' }), el('dd', { text: p.zoning || '—' }),
       el('dt', { text: 'Just value' }), el('dd', { text: money(p.just_value) }),
       el('dt', { text: 'Last sale' }), el('dd', { text: p.last_sale_price ? `${money(p.last_sale_price)} (${p.last_sale_date || '?'})` : '—' }),
       el('dt', { text: 'Asking' }), el('dd', { text: money(p.asking_price) }),
@@ -780,11 +986,65 @@ function propertyDetail(p) {
       el('dt', { text: 'Parcel ID' }), el('dd', { text: p.parcel_id || '—' }),
       el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: p.notes || '—' })),
     p.parcel_checked_at && !p.parcel_id ? el('p', { class: 'muted', style: 'font-size:13px', text: 'Couldn’t match this address to a parcel automatically. Use “Move pin” to click the right building, and the facts fill in.' }) : null,
+    buyerMatchSection(p),
+    docsSection(p, 'properties', p.pa_link ? [{ title: 'Property appraiser record', url: p.pa_link, auto: true }] : []),
     el('div', { class: 'actions' },
       el('button', { class: 'btn primary', onclick: () => openPropertyForm(p) }, 'Edit'),
       p.lat != null ? el('button', { class: 'btn', onclick: () => { closeDrawer(); go('map'); MAP.map.setView([p.lat, p.lng], 18) } }, 'Show on map') : null,
       el('button', { class: 'btn', onclick: () => startPlacing(p) }, p.lat != null ? 'Move pin' : 'Place on map'),
       refresh))
+}
+
+/* ---------- Shared drawer sections ---------- */
+function buyerMatchSection(p) {
+  const ms = matchesForProp(p)
+  return el('div', null,
+    el('div', { class: 'section-title', text: `Buyer matches (${ms.length})` }),
+    ms.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, ms.map(({ b, m }) => {
+      const c = contactById(b.contact_id)
+      return el('li', { class: 'item', onclick: () => c ? openContact(c.id) : openBuyerForm(b) },
+        el('span', { class: 'match-dot ' + m.level }),
+        el('div', { class: 'who' },
+          el('div', { class: 'name' }, b.name, el('span', { class: 'muted', style: 'font-weight:400;font-size:12px', text: m.level === 'match' ? 'fits' : 'possible fit' })),
+          el('div', { class: 'sub', text: [buyerCriteria(b), m.unknown.length ? 'unknown: ' + m.unknown.join(', ') : null].filter(Boolean).join(' · ') })),
+        (c?.phone || b.phone) ? el('a', { class: 'tel', href: telHref(c?.phone || b.phone), onclick: e => e.stopPropagation(), text: c?.phone || b.phone }) : null)
+    }))) : el('p', { class: 'muted', style: 'font-size:13px;margin:0', text: 'No buyer on your list fits this one yet.' }))
+}
+const buyerCriteria = b => [(b.markets || []).join('/'), (b.product_types || []).join('/'), sfRange(b), priceRange(b)].filter(Boolean).join(' · ')
+function buyerPropsSection(b) {
+  const ms = matchesForBuyer(b)
+  return el('div', null,
+    el('div', { class: 'section-title', text: `Properties that fit ${b.name.split(' ')[0]} (${ms.length})` }),
+    ms.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, ms.map(({ p, m }) => {
+      const li = propRow(p)
+      li.querySelector('.name')?.prepend(el('span', { class: 'match-dot ' + m.level, title: m.level === 'match' ? 'fits' : 'possible fit — unknown ' + m.unknown.join(', ') }))
+      return li
+    }))) : el('p', { class: 'muted', style: 'font-size:13px;margin:0', text: 'Nothing in your pipeline fits these criteria yet.' }))
+}
+function docsSection(obj, table, extras = []) {
+  const docs = [...extras, ...(Array.isArray(obj.documents) ? obj.documents : [])]
+  const title = el('input', { placeholder: 'Title (e.g. BOV, rent roll)', oninput: markDirty })
+  const url = el('input', { type: 'url', placeholder: 'Paste a link (Drive, Docs, Dropbox…)', oninput: markDirty })
+  const save = async list => {
+    const { error } = await sb.from(table).update({ documents: list, updated_at: nowIso() }).eq('id', obj.id)
+    if (error) { toast(error.message); return }
+    obj.documents = list; await loadTable(table); refreshDrawer(true)
+  }
+  const add = el('button', { class: 'btn small', onclick: async () => {
+    let u = url.value.trim(); if (!u) { url.focus(); return }
+    if (!/^https?:\/\//i.test(u)) u = 'https://' + u
+    let t = title.value.trim()
+    if (!t) { try { const h = new URL(u).hostname; t = /docs\.google/.test(h) ? 'Google Doc' : /drive\.google/.test(h) ? 'Drive folder' : h.replace(/^www\./, '') } catch { t = 'Link' } }
+    await save([...(obj.documents || []), { title: t, url: u, added: ymd(today()) }]); toast('Document added')
+  } }, 'Add link')
+  return el('div', null,
+    el('div', { class: 'section-title', text: `Documents (${docs.length})` }),
+    docs.length ? el('ul', { class: 'docs' }, docs.map((d, i) => el('li', null,
+      el('span', { class: 'doc-ic', text: /drive\.google\.com\/drive\/folders/.test(d.url) ? '📁' : /docs\.google/.test(d.url) ? '📄' : '🔗' }),
+      el('a', { href: d.url, target: '_blank', rel: 'noopener', text: d.title || d.url }),
+      d.added ? el('span', { class: 'muted', text: fmt(d.added) }) : null,
+      d.auto ? null : el('button', { class: 'btn small ghost', title: 'Remove', onclick: () => save((obj.documents || []).filter((_, j) => j !== i - extras.length)) }, '✕')))) : null,
+    el('div', { class: 'doc-add' }, title, url, add))
 }
 
 /* ---------- Forms ---------- */
@@ -859,6 +1119,7 @@ function openContactForm(c = {}) {
     address: el('input', { value: v('address'), placeholder: '2121 Cornell St' }),
     city: el('input', { value: v('city'), placeholder: 'Sarasota' }),
     next_follow_up: el('input', { type: 'date', value: v('next_follow_up') }),
+    next_time: el('input', { type: 'time', value: v('next_time') }),
     next_note: el('input', { value: v('next_note') }),
     notes: el('textarea', { rows: 4, text: v('notes') }),
     first: el('textarea', { rows: 3, placeholder: 'Optional — saved as the first dated conversation' }),
@@ -873,7 +1134,7 @@ function openContactForm(c = {}) {
       const row = {
         name: f.name.value.trim(), company: f.company.value.trim() || null, phone: f.phone.value.trim() || null, email: f.email.value.trim() || null,
         priority: f.priority.value, contact_type: f.contact_type.value, address: addr || null, city: city || null, address_query: aq,
-        next_follow_up: f.next_follow_up.value || null, next_note: f.next_note.value.trim() || null, notes: f.notes.value.trim() || null, updated_at: nowIso(),
+        next_follow_up: f.next_follow_up.value || null, next_time: f.next_time.value || null, next_note: f.next_note.value.trim() || null, notes: f.notes.value.trim() || null, updated_at: nowIso(),
       }
       let id = c.id
       if (editing) {
@@ -903,7 +1164,8 @@ function openContactForm(c = {}) {
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', f.priority), el('label', { class: 'f' }, 'Type', f.contact_type)),
     el('label', { class: 'f' }, 'Company / entity', f.company),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Main property address', f.address), el('label', { class: 'f' }, 'City', f.city)),
-    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', f.next_follow_up), el('label', { class: 'f' }, 'Next step', f.next_note)),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', f.next_follow_up), el('label', { class: 'f' }, 'Time (optional)', f.next_time)),
+    el('label', { class: 'f' }, 'Next step', f.next_note),
     el('label', { class: 'f' }, 'About this contact', f.notes),
     editing ? null : el('label', { class: 'f' }, 'Notes from this first conversation', f.first),
     el('div', { class: 'muted', style: 'font-size:12px', text: editing ? 'Add more buildings from the contact’s Properties section.' : 'Leave the follow-up date blank to set it by priority. The property is added to your pipeline and placed on the map automatically.' }),
@@ -942,11 +1204,11 @@ function buyersView() {
           el('div', { class: 'who' }, el('div', { class: 'name', text: r.name }), el('div', { class: 'sub', text: r.summary || '' })))))
           : el('div', { class: 'empty', text: 'No matches.' }))) : null,
     el('div', { class: 'section-title', text: 'All buyers' }),
-    el('div', { class: 'card' }, list.length ? el('ul', { class: 'list' }, list.map(b => el('li', { class: 'item', onclick: () => openBuyerForm(b) },
+    el('div', { class: 'card' }, list.length ? el('ul', { class: 'list' }, list.map(b => { const mc = matchesForBuyer(b).length; return el('li', { class: 'item', onclick: () => openBuyerForm(b) },
       el('div', { class: 'who' },
-        el('div', { class: 'name' }, b.name, b.in_1031 ? el('span', { class: 'tag Buyer', text: '1031' }) : null),
-        el('div', { class: 'sub', text: [(b.markets || []).join(', '), (b.product_types || []).join(', '), sfRange(b), priceRange(b)].filter(Boolean).join(' · ') })),
-      b.phone ? el('a', { class: 'tel', href: telHref(b.phone), onclick: e => e.stopPropagation(), text: b.phone }) : null)))
+        el('div', { class: 'name' }, b.name, b.in_1031 ? el('span', { class: 'tag Buyer', text: '1031' }) : null, mc ? el('span', { class: 'match-badge', text: `${mc} propert${mc > 1 ? 'ies' : 'y'} fit` }) : null),
+        el('div', { class: 'sub', text: buyerCriteria(b) || 'No criteria yet' })),
+      b.phone ? el('a', { class: 'tel', href: telHref(b.phone), onclick: e => e.stopPropagation(), text: b.phone }) : null) }))
       : el('div', { class: 'empty', text: 'No buyers yet.' })))
 }
 const sfRange = b => b.min_sf || b.max_sf ? `${b.min_sf ? num(b.min_sf) : '?'}–${b.max_sf ? num(b.max_sf) : '?'} SF` : ''
@@ -980,6 +1242,7 @@ function openBuyerForm(b = {}) {
     await loadTable('buyers'); closeDrawer(); render({ soft: true }); toast('Buyer saved')
   } },
     el('h2', { text: editing ? 'Edit buyer' : 'New buyer' }),
+    editing ? buyerPropsSection(b) : null,
     el('label', { class: 'f' }, 'Linked contact', f.contact_id),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Name', f.name), el('label', { class: 'f' }, 'Company', f.company)),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Phone', f.phone), el('label', { class: 'f' }, 'Email', f.email)),

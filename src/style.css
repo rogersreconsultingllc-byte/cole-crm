@@ -238,3 +238,40 @@ main.wide { max-width: none; }
 }
 .f input, .f select, .f textarea { min-width: 0; width: 100%; }
 .meetbox .row3 { grid-template-columns: 1fr 1fr 1fr; }
+
+/* ---------- v3: prospecting, buyer matching, documents ---------- */
+.chip.accent { border-color: var(--accent); }
+.chip.accent.on { background: var(--accent); color: #1b1305; border-color: var(--accent); }
+.chip.small { padding: 4px 9px; font-size: 12px; }
+.drawing, .drawing * { cursor: crosshair !important; touch-action: none; }
+.prospect { position: absolute; z-index: 600; top: 64px; right: 12px; bottom: 12px; width: 360px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.pros-head { display: flex; justify-content: space-between; align-items: center; }
+.pros-head h4 { margin: 0; font-size: 15px; }
+.pros-types { display: flex; flex-wrap: wrap; gap: 5px; }
+.pros-msg { font-size: 12px; }
+.pros-bar { font-size: 13px; font-weight: 600; border-top: 1px solid var(--line); padding-top: 8px; }
+.chk { display: flex; align-items: center; gap: 8px; }
+.pros-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; border-top: 1px solid var(--line); }
+.pros-list li { display: flex; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.pros-list li.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.pros-list input { margin-top: 3px; }
+.pr-body { flex: 1; min-width: 0; cursor: pointer; }
+.pr-addr { font-weight: 600; display: flex; gap: 6px; align-items: center; }
+.pr-owner { font-size: 13px; }
+.pr-sub { font-size: 12px; color: var(--muted); }
+.match-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: #e7f6ee; color: #1f7a4d; border: 1px solid #bfe3cf; white-space: nowrap; display: inline-block; margin-top: 4px; }
+.match-badge.weak { background: #fff6e6; color: #9a6a12; border-color: #f0dcb2; }
+@media (prefers-color-scheme: dark) { .match-badge { background: transparent; } .match-badge.weak { background: transparent; } }
+.match-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; display: inline-block; margin-right: 6px; }
+.match-dot.match { background: var(--ok); } .match-dot.possible { background: var(--b); }
+.docs { list-style: none; margin: 0 0 8px; padding: 0; }
+.docs li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.docs li a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docs li .muted { font-size: 12px; }
+.doc-add { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 6px; }
+.doc-add input { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 9px; font-size: 13px; min-width: 0; color: var(--ink); }
+@media (max-width: 760px) {
+  .prospect { top: auto; left: 8px; right: 8px; width: auto; max-height: 62vh; bottom: 8px; }
+  .doc-add { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) { .mapbar .hint { display: none; } .mapbar .search { max-width: none; flex-basis: 100%; } }
