@@ -463,7 +463,10 @@ function calendarView() {
 }
 
 /* ---------- Map ---------- */
-const MAP = { map: null, node: null, propsLayer: null, pinsLayer: null, parcels: null, placing: null, showParcels: true, showPins: true, showDead: false, q: '' }
+const MAP = { map: null, node: null, propsLayer: null, pinsLayer: null, parcels: null, placing: null, showParcels: true, showPins: false, showProspects: false, showDead: false, q: '' }
+// A property is a map lead when its owner is a contact you've talked to and ranked A/B/C
+const talkedTo = id => S.convos.some(v => v.contact_id === id)
+const isLead = p => { const c = contactById(p.contact_id); return !!(c && ['A', 'B', 'C'].includes(c.priority) && talkedTo(c.id)) }
 function mapView() {
   if (!MAP.node) {
     MAP.node = el('div', { id: 'map' })
@@ -481,7 +484,7 @@ function mapView() {
     }))
     MAP.parcels.addTo(MAP.map)
     MAP.prospectLayer = L.layerGroup().addTo(MAP.map)
-    MAP.pinsLayer = L.layerGroup().addTo(MAP.map)
+    MAP.pinsLayer = L.layerGroup(); if (MAP.showPins) MAP.pinsLayer.addTo(MAP.map)
     MAP.propsLayer = L.layerGroup().addTo(MAP.map)
     MAP.map.on('click', e => {
       if (!MAP.placing) return
@@ -495,6 +498,7 @@ function mapView() {
   wrap.append(el('div', { class: 'mapbar' },
     el('input', { class: 'search', type: 'search', placeholder: 'Filter pins… (owner, address, notes)', value: MAP.q, 'data-keep': 'mapq', oninput: e => { MAP.q = e.target.value; refreshMap() } }),
     toggle('Parcel lines', 'showParcels', () => { MAP.showParcels ? MAP.parcels.addTo(MAP.map) : MAP.parcels.remove(); paintMapHint() }),
+    toggle('Prospects', 'showProspects', refreshMap),
     toggle('Saved pins', 'showPins', () => { MAP.showPins ? MAP.pinsLayer.addTo(MAP.map) : MAP.pinsLayer.remove() }),
     toggle('Show dead', 'showDead', refreshMap),
     el('button', { class: 'chip' + (PROS.open ? ' on accent' : ' accent'), onclick: () => { PROS.open = !PROS.open; render() } }, 'Prospect an area'),
@@ -507,7 +511,7 @@ function mapView() {
     el('div', null, el('span', { class: 'sw', style: 'background:var(--c)' }), 'C owner — quarterly'),
     el('div', null, el('span', { class: 'sw ring' }), 'Active deal (meeting → contract)'),
     el('div', null, el('span', { class: 'sw', style: 'background:#7a7f87;border-radius:3px' }), 'Saved pin (no owner yet)')))
-  const unplaced = S.props.filter(p => p.lat == null)
+  const unplaced = S.props.filter(p => p.lat == null && isLead(p))
   if (unplaced.length && !PROS.open) wrap.append(el('div', { class: 'card unplaced' },
     el('h4', { text: `Not on the map yet (${unplaced.length})` }),
     el('div', { class: 'muted', style: 'font-size:12px', text: LOC.busy ? 'Looking up addresses…' : 'Click one, then click its building on the map.' }),
@@ -527,6 +531,7 @@ function refreshMap() {
   const q = MAP.q
   for (const p of S.props) {
     if (p.lat == null || p.lng == null) continue
+    if (!isLead(p) && !MAP.showProspects) continue
     if (p.stage === 'Dead' && !MAP.showDead) continue
     const c = contactById(p.contact_id)
     if (q && !propMatches(p, q)) continue
@@ -547,7 +552,7 @@ function refreshMap() {
   paintMapHint()
 }
 function fitAll() {
-  const pts = [...S.props.filter(p => p.lat != null && (MAP.showDead || p.stage !== 'Dead')), ...S.pins].map(x => [x.lat, x.lng])
+  const pts = [...S.props.filter(p => p.lat != null && (MAP.showDead || p.stage !== 'Dead') && (MAP.showProspects || isLead(p))), ...(MAP.showPins ? S.pins : [])].map(x => [x.lat, x.lng])
   if (pts.length) MAP.map.fitBounds(pts, { padding: [60, 60], maxZoom: 16 })
 }
 function propPopup(p) {
