@@ -535,7 +535,7 @@ function refreshMap() {
     if (p.stage === 'Dead' && !MAP.showDead) continue
     const c = contactById(p.contact_id)
     if (q && !propMatches(p, q)) continue
-    const cls = 'pin-' + (c ? (c.priority || 'c').toLowerCase() : 'x') + (ACTIVE.includes(p.stage) ? ' pin-active' : '') + (p.stage === 'Dead' ? ' pin-dead' : '')
+    const cls = 'pin-' + (c ? (c.priority || 'c').toLowerCase() : 'x') + (ACTIVE.includes(p.stage) ? ' pin-active' : '') + (p.stage === 'Dead' ? ' pin-dead' : '') + (c && c.priority === 'C' && !ACTIVE.includes(p.stage) ? ' pin-cfade' : '')
     const m = L.marker([p.lat, p.lng], { icon: L.divIcon({ className: cls, iconSize: [18, 18] }), title: p.address, riseOnHover: true })
     m.bindTooltip(c ? `${c.name} — ${p.address}` : p.address, { direction: 'top', offset: [0, -8] })
     m.bindPopup(() => propPopup(p), { maxWidth: 300 })
@@ -965,6 +965,7 @@ function contactDetail(c) {
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
     el('button', { class: 'btn small', style: 'margin-top:8px', onclick: () => openPropertyForm({ contact_id: c.id, city: c.city, stage: 'Contacted' }) }, '+ Add a property'),
     S.buyers.filter(b => b.contact_id === c.id).map(buyerPropsSection),
+    (() => { const mp = props.find(x => x.lat != null && x.stage !== 'Dead'); return mp ? nearbySection(mp) : null })(),
     docsSection(c, 'contacts'),
     el('dl', { class: 'facts' },
       el('dt', { text: 'Phone' }), el('dd', null, tel ? el('a', { href: tel, text: c.phone }) : '—', c.phone_note ? el('span', { class: 'muted', text: ' · ' + c.phone_note }) : null),
@@ -1026,6 +1027,7 @@ function propertyDetail(p) {
       el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: p.notes || '—' })),
     p.parcel_checked_at && !p.parcel_id ? el('p', { class: 'muted', style: 'font-size:13px', text: 'Couldn’t match this address to a parcel automatically. Use “Move pin” to click the right building, and the facts fill in.' }) : null,
     buyerMatchSection(p),
+    nearbySection(p),
     docsSection(p, 'properties', p.pa_link ? [{ title: 'Property appraiser record', url: p.pa_link, auto: true }] : []),
     el('div', { class: 'actions' },
       el('button', { class: 'btn primary', onclick: () => openPropertyForm(p) }, 'Edit'),
@@ -1035,6 +1037,49 @@ function propertyDetail(p) {
 }
 
 /* ---------- Shared drawer sections ---------- */
+const NEARBY = new Map() // property id -> { status, rows, error }
+const distMi = (a, b) => Math.hypot((a.lat - b.lat) * 69, (a.lng - b.lng) * 69 * Math.cos(a.lat * Math.PI / 180))
+function nearbySection(p) {
+  if (p.lat == null) return null
+  const box = el('div', { class: 'card nearby' })
+  const paint = () => {
+    const st = NEARBY.get(p.id)
+    if (!st || st.status === 'loading') { box.replaceChildren(el('div', { class: 'empty', text: 'Finding office & medical owners nearby…' })); return }
+    if (st.status === 'error') { box.replaceChildren(el('div', { class: 'empty', text: 'Couldn’t load nearby parcels: ' + st.error })); return }
+    const rows = st.rows.filter(x => !S.props.some(q => q.parcel_id && q.parcel_id === x.pf.parcel_id))
+    if (!rows.length) { box.replaceChildren(el('div', { class: 'empty', text: 'No other office or medical buildings within about half a mile.' })); return }
+    box.replaceChildren(el('ul', { class: 'list' }, rows.slice(0, 10).map(x => el('li', { class: 'item nb' },
+      el('div', { class: 'who' },
+        el('div', { class: 'name' }, x.pf._site || 'Parcel', el('span', { class: 'muted', style: 'font-weight:400;font-size:12px', text: x.dist.toFixed(2) + ' mi' })),
+        el('div', { class: 'sub', text: [x.pf.owner_of_record, x.pf._type, x.pf.building_sf ? num(x.pf.building_sf) + ' SF' : null, x.pf.year_built ? 'built ' + x.pf.year_built : null].filter(Boolean).join(' · ') })),
+      el('div', { class: 'nb-actions' },
+        el('button', { class: 'btn small', title: 'Show on map', onclick: () => { closeDrawer(); go('map'); requestAnimationFrame(() => { MAP.map.setView([x.center.lat, x.center.lng], 18); L.popup({ maxWidth: 320 }).setLatLng([x.center.lat, x.center.lng]).setContent(parcelPopup(x.f, x.center)).openOn(MAP.map) }) } }, 'Map'),
+        el('button', { class: 'btn small primary', onclick: async e => { e.target.disabled = true; await addProspects([x]); paint() } }, '+ Prospect'))))))
+  }
+  if (!NEARBY.has(p.id)) {
+    NEARBY.set(p.id, { status: 'loading' })
+    const d = 0.008, env = `${p.lng - d},${p.lat - d},${p.lng + d},${p.lat + d}`
+    Promise.all(COUNTY_LAYERS.map(c => queryLayer(c.id, { geometry: env, geometryType: 'esriGeometryEnvelope', outFields: PROS_FIELDS, maxAllowableOffset: '0.00002', resultRecordCount: '1000' }).then(r => r.features).catch(() => [])))
+      .then(lists => {
+        const seen = new Set(), rows = []
+        for (const f of lists.flat()) {
+          const pf = parcelFields(f)
+          if (!['Office', 'Medical office'].includes(pf._type)) continue
+          if (pf.parcel_id && (seen.has(pf.parcel_id) || pf.parcel_id === p.parcel_id)) continue
+          seen.add(pf.parcel_id)
+          const center = parcelCenter(f); if (!center) continue
+          const dist = distMi(p, center); if (dist > 0.5 || dist < 0.005) continue
+          rows.push({ key: pf.parcel_id || f._layer + ':' + f.attributes.OBJECTID, f, pf, center, dist })
+        }
+        rows.sort((a, b) => a.dist - b.dist)
+        NEARBY.set(p.id, { status: 'ok', rows })
+      })
+      .catch(e => NEARBY.set(p.id, { status: 'error', error: e.message }))
+      .finally(() => { if (box.isConnected) paint() })
+  }
+  paint()
+  return el('div', null, el('div', { class: 'section-title', text: 'Nearby office & medical owners' }), box)
+}
 function buyerMatchSection(p) {
   const ms = matchesForProp(p)
   return el('div', null,
@@ -1044,7 +1089,7 @@ function buyerMatchSection(p) {
       return el('li', { class: 'item', onclick: () => c ? openContact(c.id) : openBuyerForm(b) },
         el('span', { class: 'match-dot ' + m.level }),
         el('div', { class: 'who' },
-          el('div', { class: 'name' }, b.name, el('span', { class: 'muted', style: 'font-weight:400;font-size:12px', text: m.level === 'match' ? 'fits' : 'possible fit' })),
+          el('div', { class: 'name' }, b.name, el('span', { class: 'muted', style: 'font-weight:400;font-size:12px', text: m.level === 'match' ? 'fits' : 'possible fit' }), /^ON HOLD/i.test(b.notes || '') ? el('span', { class: 'tag', text: 'On hold — don’t pitch yet' }) : null),
           el('div', { class: 'sub', text: [buyerCriteria(b), m.unknown.length ? 'unknown: ' + m.unknown.join(', ') : null].filter(Boolean).join(' · ') })),
         (c?.phone || b.phone) ? el('a', { class: 'tel', href: telHref(c?.phone || b.phone), onclick: e => e.stopPropagation(), text: c?.phone || b.phone }) : null)
     }))) : el('p', { class: 'muted', style: 'font-size:13px;margin:0', text: 'No buyer on your list fits this one yet.' }))

@@ -276,3 +276,7 @@ main.wide { max-width: none; }
 }
 @media (max-width: 760px) { .mapbar .hint { display: none; } .mapbar .search { max-width: none; flex-basis: 100%; } }
 .callwith { color: #d6dde4 !important; border-color: #3a4a5a !important; white-space: nowrap; }
+.pin-cfade { opacity: .55 !important; }
+.pin-cfade:hover { opacity: 1 !important; }
+.nearby .item.nb { cursor: default; }
+.nb-actions { display: flex; gap: 6px; flex: none; }
