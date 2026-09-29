@@ -453,7 +453,11 @@ function mapView() {
     MAP.prospectLayer = L.layerGroup().addTo(MAP.map)
     MAP.pinsLayer = L.layerGroup().addTo(MAP.map)
     MAP.propsLayer = L.layerGroup().addTo(MAP.map)
-    MAP.map.on('click', e => { if (MAP.placing) finishPlacing(e.latlng) })
+    MAP.map.on('click', e => {
+      if (!MAP.placing) return
+      if (MAP.map.getZoom() < 16) { toast('Zoom in until you can see the building, then click it'); MAP.map.setView(e.latlng, Math.max(MAP.map.getZoom() + 3, 16)); return }
+      finishPlacing(e.latlng)
+    })
     MAP.map.on('zoomend', () => paintMapHint())
   }
   const wrap = el('div', { class: 'mapwrap' }, MAP.node)
