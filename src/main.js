@@ -72,7 +72,13 @@ function addBusinessDays(from, n) {
   while (n > 0) { d.setDate(d.getDate() + 1); if (d.getDay() !== 0 && d.getDay() !== 6) n-- }
   return d
 }
-const telHref = p => { const d = String(p || '').replace(/\D/g, ''); return d ? 'tel:+' + (d.length === 10 ? '1' + d : d) : null }
+// Phone links open Webex by default (webextel: works on Windows, Mac, iOS and Android); switchable to the device's phone app
+const callWith = () => { try { return localStorage.getItem('callWith') || 'webex' } catch { return 'webex' } }
+const telHref = p => {
+  const d = String(p || '').replace(/\D/g, ''); if (!d) return null
+  const e164 = '+' + (d.length === 10 ? '1' + d : d)
+  return (callWith() === 'webex' ? 'webextel:' : 'tel:') + e164
+}
 const mapsHref = q => q ? 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q) : null
 const addrOf = x => x.address_query || [x.address, x.city, 'FL'].filter(Boolean).join(', ')
 const slug = s => String(s).toLowerCase().replace(/&/g, ' ').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'contact'
@@ -227,6 +233,12 @@ function render({ soft } = {}) {
       k === 'today' && due ? el('span', { class: 'count', text: due }) : null))),
     el('div', { class: 'right' },
       el('div', { class: 'live' }, el('i'), el('span', { text: 'Live' })),
+      el('button', { class: 'btn small ghost callwith', title: 'Choose what phone links open', onclick: () => {
+        const next = callWith() === 'webex' ? 'phone' : 'webex'
+        try { localStorage.setItem('callWith', next) } catch { }
+        toast(next === 'webex' ? 'Phone numbers now open Webex' : 'Phone numbers now open your phone app')
+        render({ soft: true }); if (DRAWER.kind) refreshDrawer(true)
+      } }, callWith() === 'webex' ? '📞 Webex' : '📞 Phone'),
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })

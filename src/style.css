@@ -275,3 +275,4 @@ main.wide { max-width: none; }
   .doc-add { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) { .mapbar .hint { display: none; } .mapbar .search { max-width: none; flex-basis: 100%; } }
+.callwith { color: #d6dde4 !important; border-color: #3a4a5a !important; white-space: nowrap; }
