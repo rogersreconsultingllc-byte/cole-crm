@@ -443,7 +443,11 @@ async function showParcel(oid, latlng) {
     pop.setContent(n)
   } catch (e) { pop.setContent('Couldn’t load parcel: ' + esc(e.message)) }
 }
-function startPlacing(c) { MAP.placing = c; if (S.tab !== 'map') go('map'); else render() }
+function startPlacing(c) {
+  MAP.placing = c
+  if (S.tab !== 'map') go('map'); else render()
+  if (c.lat != null) requestAnimationFrame(() => MAP.map?.setView([c.lat, c.lng], 18))
+}
 async function finishPlacing(latlng) {
   const c = MAP.placing; MAP.placing = null
   let parcel = null
@@ -459,11 +463,12 @@ async function finishPlacing(latlng) {
 let geoBusy = false
 async function geocodeOne(c) {
   const q = addrOf(c)
-  const url = 'https://nominatim.openstreetmap.org/search?' + new URLSearchParams({ q, format: 'json', limit: '1', countrycodes: 'us', viewbox: '-83.2,28.2,-81.6,26.6', bounded: '0' })
-  const r = await fetch(url, { headers: { Accept: 'application/json' } })
+  const r = await fetch('/api/geocode?' + new URLSearchParams({ q }))
+  if (!r.ok) return null
   const j = await r.json()
-  if (!j[0]) return null
-  let pt = { lat: +j[0].lat, lng: +j[0].lon }, parcelId = null, note = 'Geocoded (OpenStreetMap)'
+  if (j.lat == null) return null
+  let pt = { lat: +j.lat, lng: +j.lng }, parcelId = null
+  let note = `Geocoded (${j.source})${j.approximate ? ' — approximate, check it' : ''}: ${j.matched || q}`
   // Snap to the parcel under that point when the house number matches
   try {
     const [f] = await queryParcel('1=1', { geometry: `${pt.lng},${pt.lat}`, geometryType: 'esriGeometryPoint', inSR: '4326', spatialRel: 'esriSpatialRelIntersects' })
@@ -490,7 +495,7 @@ async function geocodeMissing() {
       }
     } catch (e) { console.warn('geocode', c.id, e) }
     if (S.tab === 'map') refreshMap()
-    await new Promise(r => setTimeout(r, 1100)) // OpenStreetMap asks for ≤1 lookup/second
+    await new Promise(r => setTimeout(r, 600))
   }
   geoBusy = false
   if (S.tab === 'map') render({ soft: true })
