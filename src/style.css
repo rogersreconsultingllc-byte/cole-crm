@@ -312,3 +312,5 @@ ul.plain { list-style: none; margin: 6px 0 0; padding: 0; }
 ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line, rgba(0,0,0,.08)); font-size: 13.5px; }
 ul.plain li:last-child { border-bottom: 0; }
 .legend .sw.cold { background: #3fb27f; width: 10px; height: 10px; }
+
+.pitch-tip { margin: 10px 0; padding: 8px 12px; border-radius: 10px; background: rgba(232,176,75,.14); border-left: 3px solid #e8b04b; font-size: 13px; line-height: 1.4; }

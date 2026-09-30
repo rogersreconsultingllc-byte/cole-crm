@@ -933,6 +933,8 @@ async function logCall(c, { note, talked, priority, next, nextTime, nextNote, me
   for (const p of bump) await sb.from('properties').update({ stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso(), updated_at: nowIso() }).eq('id', p.id)
   await Promise.all([loadTable('conversations'), loadTable('contacts'), bump.length ? loadTable('properties') : null])
 }
+// Dial reminder shown wherever Cole makes calls
+const pitchTip = () => el('div', { class: 'pitch-tip' }, el('strong', { text: 'On the call: ' }), 'say “a strategic analysis of your building,” not “BOV” or “proposal.”')
 function outcomeBar(c, notesField) {
   const T = today(), pri = c.priority || 'C'
   const extra = () => notesField.value.trim()
@@ -993,6 +995,7 @@ function contactDetail(c) {
       tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + c.phone) : null),
     el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Next call' }), el('b', { text: fmt(c.next_follow_up, LONG) + (c.next_follow_up ? ' · ' + (c.next_time ? fmtTime(c.next_time) : 'first call block') : '') }), c.next_note ? el('div', { text: c.next_note }) : null),
     el('div', { class: 'section-title', text: 'How did the call go?' }),
+    pitchTip(),
     outcomeBar(c, notes),
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
@@ -1513,6 +1516,7 @@ function prospectDetail(r) {
     r.other_properties?.length ? [el('div', { class: 'section-title', text: `Other buildings on this list (${r.other_properties.length})` }),
       el('ul', { class: 'plain' }, r.other_properties.map(o => { const a = [o.address, o.city, 'FL', o.zip].filter(Boolean).join(', '); return el('li', null, el('a', { href: mapsHref(a), target: '_blank', rel: 'noopener', text: a }), el('span', { class: 'muted', text: ' · ' + [o.sf ? num(o.sf) + ' SF' : null, o.year_built ? 'built ' + o.year_built : null, o.entity].filter(Boolean).join(' · ') })) }))] : null,
     r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn primary', onclick: () => openContact(r.converted_contact_id) }, 'Open contact →') : null,
+    pitchTip(),
     el('div', { class: 'section-title', text: `Numbers (${phones.length})` }),
     phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', text: 'No numbers — this owner needs skip tracing.' }),
     el('label', { class: 'f', style: 'margin-top:8px' }, 'Note (saved with the next outcome you tap)', notes),
