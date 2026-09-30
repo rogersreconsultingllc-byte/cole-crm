@@ -464,7 +464,7 @@ function calendarView() {
 }
 
 /* ---------- Map ---------- */
-const MAP = { map: null, node: null, propsLayer: null, pinsLayer: null, parcels: null, placing: null, showParcels: true, showPins: false, showProspects: false, showDead: false, q: '' }
+const MAP = { map: null, node: null, propsLayer: null, pinsLayer: null, parcels: null, placing: null, showParcels: true, showPins: false, showProspects: false, showCold: false, showDead: false, q: '', cold: null }
 // A property is a map lead when its owner is a contact you've talked to and ranked A/B/C
 const talkedTo = id => S.convos.some(v => v.contact_id === id)
 const isLead = p => { const c = contactById(p.contact_id); return !!(c && ['A', 'B', 'C'].includes(c.priority) && talkedTo(c.id)) }
@@ -486,6 +486,7 @@ function mapView() {
     MAP.parcels.addTo(MAP.map)
     MAP.prospectLayer = L.layerGroup().addTo(MAP.map)
     MAP.pinsLayer = L.layerGroup(); if (MAP.showPins) MAP.pinsLayer.addTo(MAP.map)
+    MAP.coldLayer = L.layerGroup().addTo(MAP.map)
     MAP.propsLayer = L.layerGroup().addTo(MAP.map)
     MAP.map.on('click', e => {
       if (!MAP.placing) return
@@ -500,6 +501,7 @@ function mapView() {
     el('input', { class: 'search', type: 'search', placeholder: 'Filter pins… (owner, address, notes)', value: MAP.q, 'data-keep': 'mapq', oninput: e => { MAP.q = e.target.value; refreshMap() } }),
     toggle('Parcel lines', 'showParcels', () => { MAP.showParcels ? MAP.parcels.addTo(MAP.map) : MAP.parcels.remove(); paintMapHint() }),
     toggle('Prospects', 'showProspects', refreshMap),
+    toggle('Cold list', 'showCold', refreshCold),
     toggle('Saved pins', 'showPins', () => { MAP.showPins ? MAP.pinsLayer.addTo(MAP.map) : MAP.pinsLayer.remove() }),
     toggle('Show dead', 'showDead', refreshMap),
     el('button', { class: 'chip' + (PROS.open ? ' on accent' : ' accent'), onclick: () => { PROS.open = !PROS.open; render() } }, 'Prospect an area'),
@@ -511,7 +513,8 @@ function mapView() {
     el('div', null, el('span', { class: 'sw', style: 'background:var(--b)' }), 'B owner — monthly'),
     el('div', null, el('span', { class: 'sw', style: 'background:var(--c)' }), 'C owner — quarterly'),
     el('div', null, el('span', { class: 'sw ring' }), 'Active deal (meeting → contract)'),
-    el('div', null, el('span', { class: 'sw', style: 'background:#7a7f87;border-radius:3px' }), 'Saved pin (no owner yet)')))
+    el('div', null, el('span', { class: 'sw', style: 'background:#7a7f87;border-radius:3px' }), 'Saved pin (no owner yet)'),
+    MAP.showCold ? el('div', null, el('span', { class: 'sw cold' }), 'Cold list — not called yet (green = owner verified)') : null))
   const unplaced = S.props.filter(p => p.lat == null && isLead(p))
   if (unplaced.length && !PROS.open) wrap.append(el('div', { class: 'card unplaced' },
     el('h4', { text: `Not on the map yet (${unplaced.length})` }),
@@ -551,6 +554,35 @@ function refreshMap() {
     m.addTo(MAP.pinsLayer)
   }
   paintMapHint()
+}
+/* Cold-list owners (Prospects tab) as small dots — only when toggled on */
+async function refreshCold() {
+  if (!MAP.coldLayer) return
+  MAP.coldLayer.clearLayers()
+  if (!MAP.showCold) { render({ soft: true }); return }
+  if (!MAP.cold) {
+    const rows = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await sb.from('prospects').select('id, owner_name, company, property_address, city, status, ownership_check, owner_of_record, lat, lng')
+        .not('lat', 'is', null).in('status', ['New', 'Attempted', 'Reached', 'Bad data']).neq('ownership_check', 'Public/institution').range(from, from + 999)
+      if (error) { toast(error.message); return }
+      rows.push(...data); if (data.length < 1000) break
+    }
+    MAP.cold = rows
+  }
+  const byBldg = new Map()
+  for (const r of MAP.cold) { const k = r.lat.toFixed(5) + ',' + r.lng.toFixed(5); if (!byBldg.has(k)) byBldg.set(k, []); byBldg.get(k).push(r) }
+  for (const rs of byBldg.values()) {
+    const ok = rs.some(r => ['Owner match', 'Company match'].includes(r.ownership_check))
+    const m = L.circleMarker([rs[0].lat, rs[0].lng], { radius: 6, weight: 2, color: '#fff', fillColor: ok ? '#3fb27f' : '#9aa0a8', fillOpacity: .95 })
+    m.bindTooltip(`${rs[0].property_address} — ${rs.length} owner contact${rs.length > 1 ? 's' : ''}`, { direction: 'top' })
+    m.bindPopup(() => el('div', { class: 'pop' },
+      el('h3', { text: rs[0].property_address + (rs[0].city ? ', ' + rs[0].city : '') }),
+      rs[0].owner_of_record ? el('div', { class: 'muted', style: 'font-size:12px', text: 'County owner: ' + rs[0].owner_of_record }) : null,
+      el('ul', { class: 'plain' }, rs.map(r => el('li', null, el('a', { href: '#', onclick: e => { e.preventDefault(); openProspect(r.id) }, text: r.owner_name }), r.company ? el('span', { class: 'muted', text: ' · ' + r.company }) : null, ' ', ownTag(r))))), { maxWidth: 320 })
+    m.addTo(MAP.coldLayer)
+  }
+  render({ soft: true })
 }
 function fitAll() {
   const pts = [...S.props.filter(p => p.lat != null && (MAP.showDead || p.stage !== 'Dead') && (MAP.showProspects || isLead(p))), ...(MAP.showPins ? S.pins : [])].map(x => [x.lat, x.lng])
@@ -1344,11 +1376,14 @@ function openBuyerForm(b = {}) {
 }
 
 /* ---------- Prospects (owners not yet talked to) ---------- */
-const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
+const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
 const P_STATUS = { tocall: ['New', 'Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
 const P_STATUS_LABEL = { tocall: 'To call', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
+const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Verified owner', ['Owner match', 'Company match']], unverified: ['Owner not confirmed', ['Different owner', 'Not checked']], public: ['Public/institutional', ['Public/institution']], all: ['Everyone', null] }
+const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'] }
+const ownTag = r => { const t = OWN_TAG[r.ownership_check]; return t ? el('span', { class: 'otag ' + t[1], title: t[2], text: t[0] }) : null }
 const phoneRank = s => ({ Good: 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
 const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v).trim() }
 
@@ -1362,9 +1397,11 @@ async function loadProspects() {
   let q = sb.from('prospects').select('*, prospect_phones(*)', { count: 'exact' })
   if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
   if (P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
+  if (P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
+  else if (P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
   if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
-  if (P.status === 'tocall') q = q.order('next_attempt_on', { ascending: true, nullsFirst: true }).order('attempts').order('owner_name')
+  if (P.status === 'tocall') q = q.order('next_attempt_on', { ascending: true, nullsFirst: true }).order('own_rank').order('attempts').order('owner_name')
   else q = q.order('updated_at', { ascending: false })
   q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
   const { data, error, count } = await q
@@ -1373,7 +1410,7 @@ async function loadProspects() {
   if (error) { toast(error.message); return }
   P.rows = data || []; P.total = count || 0
 }
-async function refreshProspects() { await Promise.all([loadProspects(), loadProspectCounts()]); if (S.tab === 'prospects') render({ soft: true }) }
+async function refreshProspects() { MAP.cold = null; await Promise.all([loadProspects(), loadProspectCounts()]); if (S.tab === 'prospects') render({ soft: true }) }
 
 function prospectsView() {
   if (!P.loaded && !P.loading) refreshProspects()
@@ -1394,7 +1431,8 @@ function prospectsView() {
       el('button', { class: 'chip' + (!P.county ? ' on' : ''), onclick: () => setPF({ county: '' }) }, `All counties${toCallAll ? ' · ' + toCallAll.toLocaleString() : ''}`),
       P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
     el('div', { class: 'filters' }, search,
-      el('select', { class: 'chip', onchange: e => setPF({ status: e.target.value }) }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('option', { value: k, text: v, selected: P.status === k })))),
+      el('select', { class: 'chip', onchange: e => setPF({ status: e.target.value }) }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('option', { value: k, text: v, selected: P.status === k }))),
+      el('select', { class: 'chip', title: 'Checked against county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
     !totalAll && P.loaded ? el('div', { class: 'card empty-state' },
       el('h3', { text: 'No prospects yet' }),
       el('p', { class: 'muted', text: 'Import a CSV of owners (name, property address, county, and any phone columns). Excel files: File → Save As → CSV. Or send the file to Claude and it will load it for you.' }),
@@ -1410,9 +1448,11 @@ function prospectsView() {
           el('span', { class: 'pstat ' + slug(r.status), title: r.status }),
           el('div', { class: 'who' },
             el('div', { class: 'name' }, r.owner_name, r.company && r.company !== r.owner_name ? el('span', { class: 'muted', style: 'font-weight:400', text: r.company }) : null,
+              ownTag(r),
+              r.other_properties?.length ? el('span', { class: 'tag', text: `+${r.other_properties.length} bldg` }) : null,
               r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
               due ? el('span', { class: 'late', text: 'retry due' }) : null),
-            el('div', { class: 'sub', text: [r.property_address, r.city, r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
+            el('div', { class: 'sub', text: [r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
           best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
       })) : el('div', { class: 'empty', text: P.loaded ? 'No prospects match.' : 'Loading…' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
@@ -1456,14 +1496,20 @@ function prospectDetail(r) {
       r.county ? el('span', { class: 'muted', text: r.county + ' County' }) : null,
       r.next_attempt_on ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
     el('dl', { class: 'facts' },
+      r.title ? [el('dt', { text: 'Title' }), el('dd', { text: r.title })] : null,
       r.company ? [el('dt', { text: 'Company' }), el('dd', { text: r.company })] : null,
       el('dt', { text: 'Property' }), el('dd', null, r.property_address ? el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: addr }) : '—'),
       (r.product_type || r.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [r.product_type, r.building_sf ? num(r.building_sf) + ' SF' : null, r.year_built ? 'built ' + r.year_built : null].filter(Boolean).join(' · ') })] : null,
+      r.owner_of_record || r.ownership_check ? [el('dt', { text: 'County owner' }), el('dd', null, r.owner_of_record || '—', ' ', ownTag(r))] : null,
+      r.last_sale_date || r.last_sale_price ? [el('dt', { text: 'Last sale' }), el('dd', { text: [r.last_sale_date ? fmt(r.last_sale_date, LONG) : null, r.last_sale_price > 100 ? money(r.last_sale_price) : null].filter(Boolean).join(' · ') })] : null,
       r.mailing_address ? [el('dt', { text: 'Mailing' }), el('dd', { text: [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') })] : null,
       r.email ? [el('dt', { text: 'Email' }), el('dd', null, el('a', { href: 'mailto:' + r.email, text: r.email }))] : null,
       r.parcel_id ? [el('dt', { text: 'Parcel' }), el('dd', { text: r.parcel_id })] : null,
       r.source ? [el('dt', { text: 'Source' }), el('dd', { text: r.source })] : null,
       r.notes ? [el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: r.notes })] : null),
+    r.ownership_check === 'Different owner' ? el('p', { class: 'muted', style: 'font-size:12.5px', text: `Heads up: the county lists ${r.owner_of_record} as owner, not ${r.owner_name}${r.company ? ' / ' + r.company : ''}. They may own it through that entity, or they may just work there — confirm on the call.` }) : null,
+    r.other_properties?.length ? [el('div', { class: 'section-title', text: `Other buildings on this list (${r.other_properties.length})` }),
+      el('ul', { class: 'plain' }, r.other_properties.map(o => { const a = [o.address, o.city, 'FL', o.zip].filter(Boolean).join(', '); return el('li', null, el('a', { href: mapsHref(a), target: '_blank', rel: 'noopener', text: a }), el('span', { class: 'muted', text: ' · ' + [o.sf ? num(o.sf) + ' SF' : null, o.year_built ? 'built ' + o.year_built : null, o.entity].filter(Boolean).join(' · ') })) }))] : null,
     r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn primary', onclick: () => openContact(r.converted_contact_id) }, 'Open contact →') : null,
     el('div', { class: 'section-title', text: `Numbers (${phones.length})` }),
     phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', text: 'No numbers — this owner needs skip tracing.' }),

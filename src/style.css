@@ -302,3 +302,13 @@ main.wide { max-width: none; }
 .phone-cols { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
 .chk.small { font-size: 13px; }
 @media (max-width: 760px) { .map-grid { grid-template-columns: 1fr; } }
+
+/* Ownership check badges (Prospects) */
+.otag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 1px; white-space: nowrap; }
+.otag.own-ok { background: rgba(63,178,127,.16); color: #2e9c6a; }
+.otag.own-q { background: rgba(154,160,168,.18); color: var(--muted, #6b7280); }
+.otag.own-x { background: rgba(214,92,92,.14); color: #c24d4d; }
+ul.plain { list-style: none; margin: 6px 0 0; padding: 0; }
+ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line, rgba(0,0,0,.08)); font-size: 13.5px; }
+ul.plain li:last-child { border-bottom: 0; }
+.legend .sw.cold { background: #3fb27f; width: 10px; height: 10px; }
