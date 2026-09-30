@@ -1487,6 +1487,7 @@ function prospectDetail(r) {
         act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
+        ph.status !== 'Untested' && ph.status !== 'Good' ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓')))
   }
   return el('div', null,
@@ -1548,6 +1549,16 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
   toast(status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`)
   refreshProspects(); openProspect(r.id)
+}
+async function resetPhone(r, ph) {
+  const now = nowIso()
+  const res = await Promise.all([
+    sb.from('prospect_phones').update({ status: 'Untested', attempts: Math.max(0, (ph.attempts || 1) - 1) }).eq('id', ph.id),
+    sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph.id, outcome: `Undo — ${ph.phone} put back (was ${ph.status})` }),
+    ['Bad data', 'Do not call'].includes(r.status) ? sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', next_attempt_on: ymd(today()), updated_at: now }).eq('id', r.id) : Promise.resolve({}),
+  ])
+  const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
+  toast(`${ph.phone} is back in play`); refreshProspects(); openProspect(r.id)
 }
 async function setProspectStatus(r, status, outcome) {
   const now = nowIso()
