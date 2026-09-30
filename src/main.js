@@ -3,6 +3,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import * as esri from 'esri-leaflet'
 import './style.css'
+import Papa from 'papaparse'
 
 /* ---------- Config ---------- */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://ucjicbvlctzrauahzvgf.supabase.co'
@@ -227,7 +228,7 @@ function deniedView() {
 }
 
 /* ---------- Shell ---------- */
-const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers']]
+const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers']]
 function dueCount() { const T = ymd(today()); return S.contacts.filter(c => c.next_follow_up && c.next_follow_up <= T).length }
 
 function render({ soft } = {}) {
@@ -248,7 +249,7 @@ function render({ soft } = {}) {
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })
-  const view = { today: todayView, contacts: contactsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView }[S.tab] || todayView
+  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView }[S.tab] || todayView
   const active = document.activeElement
   const focused = soft && active && active.dataset && active.dataset.keep
   const caret = focused ? active.selectionStart : null
@@ -1340,6 +1341,395 @@ function openBuyerForm(b = {}) {
       b.contact_id ? el('button', { class: 'btn ghost', type: 'button', onclick: () => openContact(b.contact_id) }, 'Open contact') : null))
   DRAWER.kind = null
   showDrawer(form)
+}
+
+/* ---------- Prospects (owners not yet talked to) ---------- */
+const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
+const P_PAGE = 50
+const P_STATUS = { tocall: ['New', 'Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
+const P_STATUS_LABEL = { tocall: 'To call', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
+const phoneRank = s => ({ Good: 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
+const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v).trim() }
+
+async function loadProspectCounts() {
+  const { data, error } = await sb.rpc('prospect_county_counts')
+  if (!error) P.counts = data || []
+}
+async function loadProspects() {
+  const my = ++P.reqId
+  P.loading = true
+  let q = sb.from('prospects').select('*, prospect_phones(*)', { count: 'exact' })
+  if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
+  if (P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
+  const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
+  if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
+  if (P.status === 'tocall') q = q.order('next_attempt_on', { ascending: true, nullsFirst: true }).order('attempts').order('owner_name')
+  else q = q.order('updated_at', { ascending: false })
+  q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
+  const { data, error, count } = await q
+  if (my !== P.reqId) return
+  P.loading = false; P.loaded = true
+  if (error) { toast(error.message); return }
+  P.rows = data || []; P.total = count || 0
+}
+async function refreshProspects() { await Promise.all([loadProspects(), loadProspectCounts()]); if (S.tab === 'prospects') render({ soft: true }) }
+
+function prospectsView() {
+  if (!P.loaded && !P.loading) refreshProspects()
+  const totalAll = P.counts.reduce((s, c) => s + Number(c.total), 0)
+  const toCallAll = P.counts.reduce((s, c) => s + Number(c.to_call), 0)
+  const T = ymd(today())
+  const search = el('input', { class: 'search', type: 'search', placeholder: 'Search owner, company, address, city…', value: P.q, 'data-keep': 'pq2',
+    oninput: e => { P.q = e.target.value; clearTimeout(P.searchTimer); P.searchTimer = setTimeout(() => { P.page = 0; refreshProspects() }, 300) } })
+  const pages = Math.max(1, Math.ceil(P.total / P_PAGE))
+  return el('div', null,
+    el('div', { class: 'head' },
+      el('div', null, el('h1', { text: 'Prospects' }), el('p', { class: 'muted', text: totalAll ? `${totalAll.toLocaleString()} owners · ${toCallAll.toLocaleString()} still to call` : 'Owners you haven’t talked to yet' })),
+      el('div', { class: 'actions' },
+        el('button', { class: 'btn', onclick: exportSkipTrace }, 'Skip-trace list'),
+        el('button', { class: 'btn', onclick: () => openProspectForm() }, '+ Prospect'),
+        el('button', { class: 'btn primary', onclick: openImport }, 'Import CSV'))),
+    el('div', { class: 'filters county-chips' },
+      el('button', { class: 'chip' + (!P.county ? ' on' : ''), onclick: () => setPF({ county: '' }) }, `All counties${toCallAll ? ' · ' + toCallAll.toLocaleString() : ''}`),
+      P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
+    el('div', { class: 'filters' }, search,
+      el('select', { class: 'chip', onchange: e => setPF({ status: e.target.value }) }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('option', { value: k, text: v, selected: P.status === k })))),
+    !totalAll && P.loaded ? el('div', { class: 'card empty-state' },
+      el('h3', { text: 'No prospects yet' }),
+      el('p', { class: 'muted', text: 'Import a CSV of owners (name, property address, county, and any phone columns). Excel files: File → Save As → CSV. Or send the file to Claude and it will load it for you.' }),
+      el('button', { class: 'btn primary', onclick: openImport }, 'Import CSV')) :
+    el('div', { class: 'card' },
+      P.loading && !P.rows.length ? el('div', { class: 'empty', text: 'Loading…' }) :
+      P.rows.length ? el('ul', { class: 'list' }, P.rows.map(r => {
+        const phones = [...(r.prospect_phones || [])].sort((a, b) => phoneRank(a.status) - phoneRank(b.status))
+        const live = phones.filter(ph => !PHONE_BAD.includes(ph.status))
+        const best = live[0]
+        const due = r.next_attempt_on && r.next_attempt_on <= T
+        return el('li', { class: 'item', onclick: () => openProspect(r.id) },
+          el('span', { class: 'pstat ' + slug(r.status), title: r.status }),
+          el('div', { class: 'who' },
+            el('div', { class: 'name' }, r.owner_name, r.company && r.company !== r.owner_name ? el('span', { class: 'muted', style: 'font-weight:400', text: r.company }) : null,
+              r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
+              due ? el('span', { class: 'late', text: 'retry due' }) : null),
+            el('div', { class: 'sub', text: [r.property_address, r.city, r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
+          best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
+      })) : el('div', { class: 'empty', text: P.loaded ? 'No prospects match.' : 'Loading…' })),
+    P.total > P_PAGE ? el('div', { class: 'pager' },
+      el('button', { class: 'btn small', disabled: P.page === 0, onclick: () => { P.page--; refreshProspects() } }, '‹ Prev'),
+      el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} owners` }),
+      el('button', { class: 'btn small', disabled: P.page + 1 >= pages, onclick: () => { P.page++; refreshProspects() } }, 'Next ›')) : null)
+}
+function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage.setItem('pCounty', P.county) } catch { } P.rows = []; P.loading = true; render({ soft: true }); refreshProspects() }
+
+/* Prospect drawer */
+async function openProspect(id) {
+  const { data, error } = await sb.from('prospects').select('*, prospect_phones(*), prospect_calls(*)').eq('id', id).single()
+  if (error) { toast(error.message); return }
+  DRAWER.kind = null
+  showDrawer(prospectDetail(data))
+}
+function prospectDetail(r) {
+  const phones = [...(r.prospect_phones || [])].sort((a, b) => phoneRank(a.status) - phoneRank(b.status))
+  const calls = [...(r.prospect_calls || [])].sort((a, b) => String(b.called_at).localeCompare(String(a.called_at)))
+  const addr = [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ')
+  const notes = el('textarea', { rows: 2, placeholder: 'Optional note for this attempt' })
+  const newPhone = el('input', { type: 'tel', placeholder: 'Add a number' })
+  const phoneRow = ph => {
+    const act = (label, outcome, statusTo) => el('button', { class: 'btn small' + (ph.status === statusTo ? ' on' : ''), onclick: e => { e.target.disabled = true; recordAttempt(r, ph, outcome, statusTo, notes.value.trim()) } }, label)
+    return el('div', { class: 'pphone' + (PHONE_BAD.includes(ph.status) ? ' dead' : '') },
+      el('div', { class: 'pp-top' },
+        el('a', { class: 'tel', href: telHref(ph.phone), text: ph.phone }),
+        ph.phone_type ? el('span', { class: 'muted', text: ph.phone_type }) : null,
+        el('span', { class: 'ptag ' + slug(ph.status), text: ph.status }),
+        ph.attempts ? el('span', { class: 'muted', style: 'font-size:12px', text: `${ph.attempts}×${ph.last_called_at ? ' · last ' + fmt(ph.last_called_at.slice(0, 10)) : ''}` }) : null),
+      el('div', { class: 'pp-acts' },
+        act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
+        act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
+        act('DNC', 'Asked not to be called', 'Do not call'),
+        el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓')))
+  }
+  return el('div', null,
+    el('div', { class: 'dhead' }, el('h2', { text: r.owner_name })),
+    el('div', { class: 'actions', style: 'margin-top:6px' },
+      el('span', { class: 'ptag ' + slug(r.status), text: r.status }),
+      r.county ? el('span', { class: 'muted', text: r.county + ' County' }) : null,
+      r.next_attempt_on ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
+    el('dl', { class: 'facts' },
+      r.company ? [el('dt', { text: 'Company' }), el('dd', { text: r.company })] : null,
+      el('dt', { text: 'Property' }), el('dd', null, r.property_address ? el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: addr }) : '—'),
+      (r.product_type || r.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [r.product_type, r.building_sf ? num(r.building_sf) + ' SF' : null, r.year_built ? 'built ' + r.year_built : null].filter(Boolean).join(' · ') })] : null,
+      r.mailing_address ? [el('dt', { text: 'Mailing' }), el('dd', { text: [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') })] : null,
+      r.email ? [el('dt', { text: 'Email' }), el('dd', null, el('a', { href: 'mailto:' + r.email, text: r.email }))] : null,
+      r.parcel_id ? [el('dt', { text: 'Parcel' }), el('dd', { text: r.parcel_id })] : null,
+      r.source ? [el('dt', { text: 'Source' }), el('dd', { text: r.source })] : null,
+      r.notes ? [el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: r.notes })] : null),
+    r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn primary', onclick: () => openContact(r.converted_contact_id) }, 'Open contact →') : null,
+    el('div', { class: 'section-title', text: `Numbers (${phones.length})` }),
+    phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', text: 'No numbers — this owner needs skip tracing.' }),
+    el('label', { class: 'f', style: 'margin-top:8px' }, 'Note (saved with the next outcome you tap)', notes),
+    el('div', { class: 'doc-add', style: 'grid-template-columns:1fr auto;margin-top:10px' }, newPhone,
+      el('button', { class: 'btn small', onclick: async () => {
+        const v = newPhone.value.trim(); if (v.replace(/\D/g, '').length < 7) return
+        const { error } = await sb.from('prospect_phones').insert({ prospect_id: r.id, phone: fmtPhone(v) })
+        if (error) { toast(error.message); return }
+        if (r.status === 'Bad data') await sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', updated_at: nowIso() }).eq('id', r.id)
+        openProspect(r.id); refreshProspects()
+      } }, 'Add number')),
+    el('div', { class: 'actions', style: 'margin-top:16px' },
+      el('button', { class: 'btn', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
+      el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
+      el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
+      el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit')),
+    calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
+      el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
+}
+
+async function recordAttempt(r, ph, outcome, phoneStatus, note) {
+  const now = nowIso(), T = today()
+  const phones = (r.prospect_phones || []).map(x => x.id === ph.id ? { ...x, status: phoneStatus } : x)
+  const liveLeft = phones.filter(x => !PHONE_BAD.includes(x.status))
+  const attempts = (r.attempts || 0) + 1
+  let status = 'Attempted', next = ymd(addBusinessDays(T, outcome === 'Left voicemail' ? 2 : 1))
+  if (!liveLeft.length) { status = phones.every(x => x.status === 'Do not call') ? 'Do not call' : 'Bad data'; next = null }
+  else if (attempts >= 6) next = ymd(addBusinessDays(T, 20)) // after 6 tries, cool off ~a month
+  const res = await Promise.all([
+    sb.from('prospect_phones').update({ status: phoneStatus, attempts: (ph.attempts || 0) + 1, last_called_at: now }).eq('id', ph.id),
+    sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph.id, outcome: `${outcome} (${ph.phone})`, notes: note || null }),
+    sb.from('prospects').update({ status, attempts, last_attempt_at: now, next_attempt_on: next, updated_at: now }).eq('id', r.id),
+  ])
+  const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
+  toast(status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`)
+  refreshProspects(); openProspect(r.id)
+}
+async function setProspectStatus(r, status, outcome) {
+  const now = nowIso()
+  await sb.from('prospect_calls').insert({ prospect_id: r.id, outcome })
+  const { error } = await sb.from('prospects').update({ status, next_attempt_on: null, last_attempt_at: now, updated_at: now }).eq('id', r.id)
+  if (error) { toast(error.message); return }
+  toast(`${r.owner_name}: ${status}`); refreshProspects(); openProspect(r.id)
+}
+
+/* Talked → becomes a real contact */
+function openConvert(r, ph) {
+  const T = today()
+  const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === 'B' })))
+  const type = el('select', null, TYPES.map(t => el('option', { value: t, text: t, selected: t === 'Seller' })))
+  const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?' })
+  const next = el('input', { type: 'date', value: ymd(addCadence(T, 'B')) })
+  pri.onchange = () => { next.value = ymd(addCadence(T, pri.value)) }
+  const nextNote = el('input', { placeholder: 'Next step' })
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary', type: 'submit' }, 'Save as contact')
+  const form = el('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault(); if (!notes.value.trim()) { err.textContent = 'Add a note about the conversation.'; return }
+    save.disabled = true
+    try {
+      const base = slug(r.owner_name)
+      const { data: taken } = await sb.from('contacts').select('id').like('id', base + '%')
+      const used = new Set((taken || []).map(x => x.id)); let id = base, n = 2
+      while (used.has(id)) id = base + '-' + n++
+      const goodPhone = ph || (r.prospect_phones || []).find(x => !PHONE_BAD.includes(x.status))
+      const aq = r.property_address ? [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ') : null
+      const contact = { id, name: r.owner_name, company: r.company, priority: pri.value, contact_type: type.value, phone: goodPhone?.phone || null, email: r.email,
+        address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id,
+        next_follow_up: next.value || null, next_note: nextNote.value.trim() || null, last_contact: ymd(T),
+        notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
+      const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
+      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: notes.value.trim() }); if (e2) throw e2
+      if (r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: 'Contacted' })
+      if (ph) await sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: nowIso() }).eq('id', ph.id)
+      await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: `Talked → contact (${pri.value})`, notes: notes.value.trim() })
+      await sb.from('prospects').update({ status: 'Converted', converted_contact_id: id, next_attempt_on: null, last_attempt_at: nowIso(), attempts: (r.attempts || 0) + 1, updated_at: nowIso() }).eq('id', r.id)
+      await Promise.all([loadTable('contacts'), loadTable('conversations'), loadTable('properties')])
+      refreshProspects(); openContact(id); locateMissing(); toast(`${r.owner_name} added to your contacts (${pri.value})`)
+    } catch (x) { err.textContent = x.message || String(x); save.disabled = false }
+  } },
+    el('h2', { text: 'Talked to ' + r.owner_name }),
+    el('p', { class: 'muted', text: 'They move into your contacts with a priority and cadence, and their building goes on the map and pipeline.' }),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Type', type)),
+    el('label', { class: 'f' }, 'Notes from the call', notes),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Next step', nextNote)),
+    err, el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => openProspect(r.id) }, 'Cancel')))
+  DRAWER.kind = null
+  showDrawer(form)
+  notes.focus()
+}
+
+/* Add / edit one prospect */
+function openProspectForm(r = {}) {
+  const editing = !!r.id
+  const f = {}
+  for (const k of ['owner_name', 'company', 'property_address', 'city', 'county', 'zip', 'product_type', 'mailing_address', 'email'])
+    f[k] = el('input', { value: r[k] ?? '', required: k === 'owner_name' })
+  const phones = el('input', { placeholder: 'Comma separated' })
+  const notes = el('textarea', { rows: 3, text: r.notes || '' })
+  const err = el('div', { class: 'err' })
+  const form = el('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault()
+    const row = Object.fromEntries(Object.entries(f).map(([k, i]) => [k, i.value.trim() || null]))
+    row.notes = notes.value.trim() || null; row.updated_at = nowIso()
+    if (!row.county && row.city) row.county = CITY_COUNTY[norm(row.city)] || null
+    let id = r.id
+    if (editing) { const { error } = await sb.from('prospects').update(row).eq('id', id); if (error) { err.textContent = error.message; return } }
+    else { row.source = 'Added by hand'; const { data, error } = await sb.from('prospects').insert(row).select('id').single(); if (error) { err.textContent = error.message; return } id = data.id }
+    const list = phones.value.split(/[,;\n]/).map(x => x.trim()).filter(x => x.replace(/\D/g, '').length >= 7)
+    if (list.length) await sb.from('prospect_phones').upsert(list.map(p => ({ prospect_id: id, phone: fmtPhone(p) })), { onConflict: 'prospect_id,digits', ignoreDuplicates: true })
+    refreshProspects(); openProspect(id)
+  } },
+    el('h2', { text: editing ? 'Edit prospect' : 'New prospect' }),
+    el('label', { class: 'f' }, 'Owner name', f.owner_name), el('label', { class: 'f' }, 'Company / entity', f.company),
+    el('label', { class: 'f' }, 'Property address', f.property_address),
+    el('div', { class: 'row3' }, el('label', { class: 'f' }, 'City', f.city), el('label', { class: 'f' }, 'County', f.county), el('label', { class: 'f' }, 'ZIP', f.zip)),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Property type', f.product_type), el('label', { class: 'f' }, 'Email', f.email)),
+    el('label', { class: 'f' }, 'Mailing address', f.mailing_address),
+    el('label', { class: 'f' }, editing ? 'Add phone numbers' : 'Phone numbers', phones),
+    el('label', { class: 'f' }, 'Notes', notes),
+    err, el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'submit' }, 'Save'), el('button', { class: 'btn', type: 'button', onclick: () => editing ? openProspect(r.id) : closeDrawer() }, 'Cancel')))
+  DRAWER.kind = null
+  showDrawer(form)
+}
+
+/* CSV import with column matching */
+const IMPORT_FIELDS = [
+  ['owner_name', 'Owner name', /^(owner|owner ?name|owner ?1|full ?name|name|contact ?name)$/i],
+  ['first_name', 'First name', /first/i],
+  ['last_name', 'Last name', /last ?name|^last$/i],
+  ['company', 'Company / entity', /(company|entity|business|organization|llc)/i],
+  ['property_address', 'Property address', /^(property ?address|site ?address|situs.*|address|street ?address|property ?street)$/i],
+  ['city', 'Property city', /^(property ?city|site ?city|situs ?city|city)$/i],
+  ['county', 'County', /county/i],
+  ['zip', 'Property ZIP', /^(property ?zip|site ?zip|situs ?zip|zip|zip ?code|postal ?code)$/i],
+  ['mailing_address', 'Mailing address', /mail.*(addr|street)|owner ?address/i],
+  ['mailing_city', 'Mailing city', /mail.*city|owner ?city/i],
+  ['mailing_state', 'Mailing state', /mail.*state|owner ?state/i],
+  ['mailing_zip', 'Mailing ZIP', /mail.*zip|owner ?zip/i],
+  ['email', 'Email', /e-?mail/i],
+  ['product_type', 'Property type', /(property ?type|land ?use|use ?code|use$|^type$)/i],
+  ['building_sf', 'Building SF', /(sq ?ft|sqft|square|building ?size|bldg ?sf|^sf$|living ?area)/i],
+  ['year_built', 'Year built', /year ?built/i],
+  ['parcel_id', 'Parcel ID', /(parcel|apn|folio)/i],
+  ['notes', 'Notes', /note/i],
+]
+function openImport() {
+  const file = el('input', { type: 'file', accept: '.csv,text/csv' })
+  const body = el('div', { class: 'stack' })
+  const wrap = el('div', { class: 'stack' },
+    el('h2', { text: 'Import prospects' }),
+    el('p', { class: 'muted', text: 'One owner per row. Any number of phone columns works (Phone 1, Phone 2, Mobile…). Excel: File → Save As → CSV. Owners whose number is already in your contacts are skipped, and duplicates are merged.' }),
+    el('label', { class: 'f' }, 'CSV file', file), body)
+  file.onchange = () => {
+    const fl = file.files[0]; if (!fl) return
+    body.replaceChildren(el('div', { class: 'muted', text: 'Reading file…' }))
+    Papa.parse(fl, { header: true, skipEmptyLines: true, complete: res => mapStep(res, fl.name), error: e => body.replaceChildren(el('div', { class: 'err', text: e.message })) })
+  }
+  function mapStep(res, fname) {
+    const cols = (res.meta.fields || []).filter(Boolean)
+    const used = new Set(), pick = {}
+    for (const [k, , re] of IMPORT_FIELDS) { const c = cols.find(c => !used.has(c) && re.test(c.trim())); if (c) { pick[k] = c; used.add(c) } }
+    const isPhoneCol = c => /(phone|mobile|cell|landline|wireless|tel\b|number)/i.test(c) && !/(type|status|dnc|score|litig|carrier|line ?type|count)/i.test(c)
+    const selects = {}
+    const grid = el('div', { class: 'map-grid' }, IMPORT_FIELDS.map(([k, label]) => {
+      selects[k] = el('select', null, el('option', { value: '', text: '— skip —' }), cols.map(c => el('option', { value: c, text: c, selected: pick[k] === c })))
+      return el('label', { class: 'f' }, label, selects[k])
+    }))
+    const phoneBoxes = cols.map(c => el('label', { class: 'chk small' }, el('input', { type: 'checkbox', checked: isPhoneCol(c), value: c }), c))
+    const source = el('input', { value: fname.replace(/\.csv$/i, '') })
+    const status = el('div', { class: 'muted' })
+    const go = el('button', { class: 'btn primary' }, `Import ${res.data.length.toLocaleString()} rows`)
+    go.onclick = async () => {
+      go.disabled = true
+      const map = Object.fromEntries(Object.entries(selects).map(([k, s]) => [k, s.value]).filter(([, v]) => v))
+      if (!map.owner_name && !map.first_name && !map.company) { status.textContent = 'Pick the column with the owner name.'; go.disabled = false; return }
+      const pcs = phoneBoxes.map(l => l.querySelector('input')).filter(i => i.checked).map(i => i.value)
+      try { await runImport(res.data, map, pcs, source.value.trim() || fname, status) } catch (x) { status.textContent = 'Import failed: ' + (x.message || x); go.disabled = false }
+    }
+    body.replaceChildren(
+      el('div', { class: 'muted', text: `${res.data.length.toLocaleString()} rows · ${cols.length} columns. Check the matches below.` }),
+      grid,
+      el('div', { class: 'section-title', text: 'Phone number columns' }),
+      el('div', { class: 'phone-cols' }, phoneBoxes),
+      el('label', { class: 'f' }, 'Source (shown on each prospect)', source),
+      status, el('div', { class: 'actions' }, go))
+  }
+  DRAWER.kind = null
+  showDrawer(wrap)
+}
+async function runImport(rows, map, phoneCols, source, status) {
+  const get = (r, k) => map[k] ? String(r[map[k]] ?? '').trim() : ''
+  const batch = source + ' · ' + ymd(today())
+  const d10 = v => String(v || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')
+  const contactDigits = new Set(S.contacts.map(c => d10(c.phone)).filter(Boolean))
+  status.textContent = 'Checking for duplicates…'
+  const existing = new Set()
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await sb.from('prospects').select('owner_name,property_address').range(from, from + 999)
+    if (error) throw error
+    for (const x of data) existing.add(norm(x.owner_name) + '|' + norm(x.property_address))
+    if (data.length < 1000) break
+  }
+  const merged = new Map(); let skippedContact = 0, skippedDup = 0, noName = 0
+  for (const r of rows) {
+    const owner = get(r, 'owner_name') || [get(r, 'first_name'), get(r, 'last_name')].filter(Boolean).join(' ') || get(r, 'company')
+    if (!owner) { noName++; continue }
+    const phones = [...new Set(phoneCols.map(c => String(r[c] ?? '').trim()).filter(p => d10(p).length === 10).map(fmtPhone))]
+    if (phones.some(p => contactDigits.has(d10(p)))) { skippedContact++; continue }
+    const city = get(r, 'city'), prop = get(r, 'property_address')
+    const key = norm(owner) + '|' + norm(prop)
+    if (existing.has(key)) { skippedDup++; continue }
+    const cur = merged.get(key)
+    if (cur) { cur.phones = [...new Set([...cur.phones, ...phones])]; if (cur.phones.length) cur.row.status = 'New'; continue }
+    const sf = parseFloat(get(r, 'building_sf').replace(/[^\d.]/g, '')), yb = parseInt(get(r, 'year_built'), 10)
+    let county = get(r, 'county').replace(/\s*county$/i, '').trim()
+    if (county) county = county.replace(/\b\w/g, ch => ch.toUpperCase()).replace(/\B\w+/g, w => w.toLowerCase())
+    if (!county && city) county = CITY_COUNTY[norm(city)] || null
+    merged.set(key, { phones, row: {
+      owner_name: owner, company: get(r, 'company') || null, property_address: prop || null, city: city || null, county: county || null, zip: get(r, 'zip') || null,
+      mailing_address: get(r, 'mailing_address') || null, mailing_city: get(r, 'mailing_city') || null, mailing_state: get(r, 'mailing_state') || null, mailing_zip: get(r, 'mailing_zip') || null,
+      email: get(r, 'email') || null, product_type: get(r, 'product_type') || null, building_sf: isNaN(sf) ? null : sf, year_built: isNaN(yb) ? null : yb,
+      parcel_id: get(r, 'parcel_id') || null, notes: get(r, 'notes') || null, source, import_batch: batch,
+      status: phones.length ? 'New' : 'Bad data' } })
+  }
+  const items = [...merged.values()]
+  let done = 0, phonesAdded = 0
+  for (let i = 0; i < items.length; i += 250) {
+    const chunk = items.slice(i, i + 250)
+    const { data, error } = await sb.from('prospects').insert(chunk.map(x => x.row)).select('id')
+    if (error) throw error
+    const ph = []
+    data.forEach((d, j) => chunk[j].phones.forEach(p => ph.push({ prospect_id: d.id, phone: p })))
+    for (let k = 0; k < ph.length; k += 1000) {
+      const { error: e2 } = await sb.from('prospect_phones').upsert(ph.slice(k, k + 1000), { onConflict: 'prospect_id,digits', ignoreDuplicates: true })
+      if (e2) throw e2
+    }
+    done += chunk.length; phonesAdded += ph.length
+    status.textContent = `Imported ${done.toLocaleString()} of ${items.length.toLocaleString()}…`
+  }
+  closeDrawer()
+  Object.assign(P, { county: '', status: 'tocall', page: 0 })
+  await refreshProspects(); go('prospects')
+  const extra = [skippedContact && `${skippedContact} already in contacts`, skippedDup && `${skippedDup} duplicates`, noName && `${noName} rows with no name`].filter(Boolean)
+  toast(`Imported ${done.toLocaleString()} owners · ${phonesAdded.toLocaleString()} numbers` + (extra.length ? ` · skipped ${extra.join(', ')}` : ''))
+}
+
+/* Owners with no live number → CSV for BatchSkipTracing */
+async function exportSkipTrace() {
+  const rows = []
+  for (let from = 0; ; from += 1000) {
+    let q = sb.from('prospects').select('owner_name,company,property_address,city,zip,county,mailing_address,mailing_city,mailing_state,mailing_zip').eq('status', 'Bad data')
+    if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
+    const { data, error } = await q.range(from, from + 999)
+    if (error) { toast(error.message); return }
+    rows.push(...data); if (data.length < 1000) break
+  }
+  if (!rows.length) { toast('No owners need skip tracing right now'); return }
+  const split = n => { const parts = String(n || '').trim().split(/\s+/); return parts.length > 1 ? [parts.slice(0, -1).join(' '), parts.at(-1)] : [n || '', ''] }
+  const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v }
+  const head = ['First Name', 'Last Name', 'Company', 'Property Address', 'Property City', 'Property State', 'Property Zip', 'Mailing Address', 'Mailing City', 'Mailing State', 'Mailing Zip', 'County']
+  const lines = rows.map(r => { const [fn, ln] = r.company ? ['', ''] : split(r.owner_name); return [fn, ln, r.company || '', r.property_address, r.city, 'FL', r.zip, r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip, r.county].map(q).join(',') })
+  const a = el('a', { href: URL.createObjectURL(new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv' })), download: `skip-trace-${slug(P.county || 'all')}-${ymd(today())}.csv` })
+  document.body.append(a); a.click(); a.remove()
+  toast(`${rows.length} owners exported for skip tracing`)
 }
 
 boot()

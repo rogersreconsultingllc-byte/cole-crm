@@ -280,3 +280,25 @@ main.wide { max-width: none; }
 .pin-cfade:hover { opacity: 1 !important; }
 .nearby .item.nb { cursor: default; }
 .nb-actions { display: flex; gap: 6px; flex: none; }
+
+/* ---------- Prospects ---------- */
+.county-chips { gap: 6px; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; font-size: 13px; }
+.empty-state { padding: 28px; text-align: center; }
+.empty-state h3 { margin: 0 0 6px; }
+.pstat { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--c); }
+.pstat.attempted { background: var(--b); } .pstat.reached, .pstat.converted { background: var(--ok); }
+.pstat.bad-data { background: #7a7f87; } .pstat.do-not-call, .pstat.not-interested { background: var(--a); }
+.ptag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.ptag.good, .ptag.converted, .ptag.reached { color: #1f7a4d; border-color: #bfe3cf; }
+.ptag.wrong-number, .ptag.disconnected, .ptag.do-not-call, .ptag.bad-data { color: #b33; border-color: #f0c4c4; }
+.ptag.no-answer, .ptag.voicemail, .ptag.attempted { color: #9a6a12; border-color: #f0dcb2; }
+.pphone { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-bottom: 8px; background: var(--panel); }
+.pphone.dead { opacity: .55; }
+.pp-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-acts { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+.pp-acts .btn.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--panel)); }
+.map-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.phone-cols { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.chk.small { font-size: 13px; }
+@media (max-width: 760px) { .map-grid { grid-template-columns: 1fr; } }
