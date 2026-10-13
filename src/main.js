@@ -228,7 +228,7 @@ function deniedView() {
 }
 
 /* ---------- Shell ---------- */
-const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers']]
+const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['kpis', 'KPIs']]
 function dueCount() { const T = ymd(today()); return S.contacts.filter(c => c.next_follow_up && c.next_follow_up <= T).length }
 
 function render({ soft } = {}) {
@@ -249,7 +249,7 @@ function render({ soft } = {}) {
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })
-  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView }[S.tab] || todayView
+  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, kpis: kpiView }[S.tab] || todayView
   const active = document.activeElement
   const focused = soft && active && active.dataset && active.dataset.keep
   const caret = focused ? active.selectionStart : null
@@ -997,6 +997,7 @@ function contactDetail(c) {
     el('div', { class: 'section-title', text: 'How did the call go?' }),
     pitchTip(),
     outcomeBar(c, notes),
+    milestoneBar(c),
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
     el('button', { class: 'btn small', style: 'margin-top:8px', onclick: () => openPropertyForm({ contact_id: c.id, city: c.city, stage: 'Contacted' }) }, '+ Add a property'),
@@ -1792,6 +1793,168 @@ async function exportSkipTrace() {
   const a = el('a', { href: URL.createObjectURL(new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv' })), download: `skip-trace-${slug(P.county || 'all')}-${ymd(today())}.csv` })
   document.body.append(a); a.click(); a.remove()
   toast(`${rows.length} owners exported for skip tracing`)
+}
+
+/* ---------- KPIs (weekly scorecard) ---------- */
+// Every activity is counted from what's already logged: cold-list dials (prospect_calls) and contact conversations.
+const KPI_KINDS = {
+  meeting_held: 'Meeting held', bov: 'Strategic analysis delivered', listing: 'Listing signed',
+}
+function convKind(n) {
+  const t = String(n || '').trim(), l = t.toLowerCase()
+  if (/^(no answer|didnt answer|didn't answer)/.test(l) || /^called \(.*no answer/.test(l)) return 'na'
+  if (/^left voicemail/.test(l) || /left vm/.test(l)) return 'vm'
+  if (/^(meeting set|booked in-person meeting)/.test(l)) return 'mset'
+  if (/^(meeting held|in-person meeting|zoom bov meeting)/.test(l)) return 'mheld'
+  if (/^(strategic analysis delivered|sent follow-up email with bov|bov delivered)/.test(l)) return 'bov'
+  if (/^listing signed/.test(l)) return 'listing'
+  if (/^(sent |replied|he emailed|she emailed|emailed)/.test(l)) return 'email'
+  if (/^(ownership note|added to crm|going over the building|follow up on bov|workign with|working with|cole confirmed|played pickleball|arrived late|note:)/.test(l)) return 'note'
+  if (l === 'called') return 'dial'
+  return 'talk'
+}
+const KPI = { week: null, calls: null, loading: false, from: null }
+const KPI_METRICS = [
+  ['dials', 'Dials', 300], ['people', 'Owners dialed', 150], ['connects', 'Conversations', 30], ['rate', 'Contact rate', null],
+  ['vm', 'Voicemails left', null], ['bad', 'Bad numbers', null], ['mset', 'Meetings set', 3], ['mheld', 'Meetings held', 2],
+  ['bov', 'Strategic analyses delivered', 1], ['listing', 'Listings signed', null], ['newc', 'New contacts', 10],
+]
+function kpiTargets() { let t = {}; try { t = JSON.parse(localStorage.getItem('kpiTargets') || '{}') } catch { } ; return Object.fromEntries(KPI_METRICS.map(([k, , d]) => [k, t[k] ?? d])) }
+const monday = d => { const x = new Date(d); const w = (x.getDay() + 6) % 7; x.setDate(x.getDate() - w); x.setHours(0, 0, 0, 0); return x }
+async function loadKpiCalls(from) {
+  if (KPI.loading || (KPI.calls && KPI.from && KPI.from <= from)) return
+  KPI.loading = true
+  const rows = []
+  for (let i = 0; ; i += 1000) {
+    const { data, error } = await sb.from('prospect_calls').select('prospect_id, outcome, called_at').gte('called_at', new Date(from.getTime() - 864e5).toISOString()).order('id').range(i, i + 999)
+    if (error) { toast(error.message); break }
+    rows.push(...data); if (data.length < 1000) break
+  }
+  KPI.calls = rows; KPI.from = from; KPI.loading = false
+  if (S.tab === 'kpis') render({ soft: true })
+}
+const nyDay = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+function kpiDay(day) {
+  const m = { dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, newc: 0, email: 0 }
+  const ppl = new Set()
+  for (const c of KPI.calls || []) {
+    if (nyDay(c.called_at) !== day) continue
+    const o = c.outcome || ''
+    if (/^(undo|talked)/i.test(o)) continue // conversions are counted from the contact's conversation
+    m.dials++; ppl.add('p' + c.prospect_id)
+    if (/^(reached|do not call)/i.test(o)) m.connects++
+    else if (/^left voicemail/i.test(o)) m.vm++
+    else if (/^no answer/i.test(o)) m.na++
+    else if (/^(wrong number|disconnected)/i.test(o)) m.bad++
+  }
+  const seen = new Set()
+  for (const v of S.convos) {
+    if (v.talked_on !== day) continue
+    const k = convKind(v.notes), key = v.contact_id + '|' + k
+    if (seen.has(key)) continue; seen.add(key)
+    if (['talk', 'na', 'vm', 'dial'].includes(k)) { m.dials++; ppl.add('c' + v.contact_id) }
+    if (k === 'talk') m.connects++
+    else if (k === 'vm') m.vm++
+    else if (k === 'na') m.na++
+    else if (k in m) m[k]++
+  }
+  m.newc = S.contacts.filter(c => c.created_at && nyDay(c.created_at) === day).length
+  m.people = ppl.size
+  return m
+}
+function kpiSum(days) {
+  const t = days.map(kpiDay).reduce((a, m) => { for (const k in m) a[k] = (a[k] || 0) + m[k]; return a }, {})
+  t.rate = t.dials ? t.connects / t.dials : 0
+  return t
+}
+const dayList = (start, n) => Array.from({ length: n }, (_, i) => { const d = new Date(start); d.setDate(d.getDate() + i); return ymd(d) })
+const pct = x => (x * 100).toFixed(x && x < .1 ? 1 : 0) + '%'
+function kpiView() {
+  const thisMon = monday(today())
+  if (!KPI.week) KPI.week = thisMon
+  const wk = KPI.week, earliest = new Date(Math.min(wk, thisMon)); earliest.setDate(earliest.getDate() - 7 * 7)
+  loadKpiCalls(earliest)
+  if (!KPI.calls) return el('div', { class: 'card empty', text: 'Loading your numbers…' })
+  const T = kpiTargets()
+  const days = dayList(wk, 7), weekDays = days.slice(0, 5)
+  const tot = kpiSum(days)
+  const prev = (() => { const d = new Date(wk); d.setDate(d.getDate() - 7); return kpiSum(dayList(d, 7)) })()
+  const isThis = +wk === +thisMon
+  const elapsed = isThis ? Math.min(5, Math.max(1, ((today().getDay() + 6) % 7) + 1)) : 5
+  const fmtv = (k, v) => k === 'rate' ? pct(v || 0) : (v || 0).toLocaleString()
+  const status = (k, v) => {
+    if (T[k] == null || T[k] === '') return ''
+    const goal = Number(T[k]); if (!goal) return ''
+    const pace = isThis ? goal * elapsed / 5 : goal
+    return v >= goal ? 'hit' : v >= pace ? 'pace' : 'miss'
+  }
+  const cards = KPI_METRICS.filter(([k]) => !['na'].includes(k)).map(([k, label]) => {
+    const v = tot[k] || 0, st = status(k, v), d = (v - (prev[k] || 0))
+    return el('div', { class: 'kpi ' + st },
+      el('div', { class: 'kpi-l', text: label }),
+      el('div', { class: 'kpi-v', text: fmtv(k, v) }),
+      el('div', { class: 'kpi-s' },
+        T[k] ? el('span', { text: `Goal ${Number(T[k]).toLocaleString()}` }) : null,
+        el('span', { class: 'muted', text: `${k === 'rate' ? (d >= 0 ? '+' : '') + (d * 100).toFixed(1) + ' pts' : (d >= 0 ? '+' : '') + d} vs last wk` })))
+  })
+  const rowsDef = [['dials', 'Dials'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts']]
+  const perDay = weekDays.map(d => { const m = kpiDay(d); m.rate = m.dials ? m.connects / m.dials : 0; return m })
+  const daily = el('table', { class: 'kpi-table' },
+    el('thead', null, el('tr', null, el('th', { text: '' }), weekDays.map(d => el('th', { text: fmt(d, { weekday: 'short', month: 'numeric', day: 'numeric' }) })), el('th', { text: 'Week' }))),
+    el('tbody', null, rowsDef.map(([k, label]) => el('tr', null, el('td', { text: label }), perDay.map(m => el('td', { text: m.dials || k !== 'rate' ? fmtv(k, m[k]) : '—' })), el('td', { class: 'tot', text: fmtv(k, tot[k]) })))))
+  const weeks = Array.from({ length: 8 }, (_, i) => { const d = new Date(thisMon); d.setDate(d.getDate() - 7 * (7 - i)); return d })
+  const wkTot = weeks.map(d => kpiSum(dayList(d, 7)))
+  const trend = el('table', { class: 'kpi-table' },
+    el('thead', null, el('tr', null, el('th', { text: 'Week of' }), weeks.map(d => el('th', { class: +d === +wk ? 'cur' : '', text: fmt(ymd(d), { month: 'short', day: 'numeric' }) })))),
+    el('tbody', null, rowsDef.filter(([k]) => k !== 'na').map(([k, label]) => el('tr', null, el('td', { text: label }), wkTot.map((m, i) => el('td', { class: (+weeks[i] === +wk ? 'cur ' : '') + status(k, m[k]), text: fmtv(k, m[k]) }))))))
+  const shift = n => { const d = new Date(KPI.week); d.setDate(d.getDate() + 7 * n); KPI.week = d; render({ soft: true }) }
+  return el('div', null,
+    el('div', { class: 'head' },
+      el('div', null, el('h1', { text: 'KPIs' }), el('p', { class: 'muted', text: `Week of ${fmt(ymd(wk), LONG)}${isThis ? ' · this week' : ''}` })),
+      el('div', { class: 'actions' },
+        el('button', { class: 'btn small', onclick: () => shift(-1) }, '‹ Prev week'),
+        !isThis ? el('button', { class: 'btn small', onclick: () => { KPI.week = thisMon; render({ soft: true }) } }, 'This week') : null,
+        el('button', { class: 'btn small', disabled: isThis, onclick: () => shift(1) }, 'Next week ›'),
+        el('button', { class: 'btn small ghost', onclick: openKpiTargets }, 'Edit goals'))),
+    isThis ? el('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:13px', text: `Green = goal hit · yellow = on pace for day ${elapsed} of 5 · red = behind pace` }) : null,
+    el('div', { class: 'kpi-grid' }, cards),
+    el('div', { class: 'section-title', text: 'Day by day' }),
+    el('div', { class: 'card', style: 'overflow-x:auto' }, daily),
+    el('div', { class: 'section-title', text: 'Last 8 weeks' }),
+    el('div', { class: 'card', style: 'overflow-x:auto' }, trend),
+    el('p', { class: 'muted', style: 'font-size:12.5px;margin-top:10px', text: 'Counted automatically: every outcome you tap on the Prospects tab and every call you log on a contact. Log meetings held, strategic analyses delivered and listings with the buttons on each contact.' }))
+}
+function openKpiTargets() {
+  const T = kpiTargets()
+  const inputs = {}
+  const form = el('form', { class: 'stack', onsubmit: e => {
+    e.preventDefault()
+    const out = {}; for (const [k, i] of Object.entries(inputs)) out[k] = i.value === '' ? null : Number(i.value)
+    try { localStorage.setItem('kpiTargets', JSON.stringify(out)) } catch { }
+    closeDrawer(); toast('Goals saved'); render({ soft: true })
+  } },
+    el('h2', { text: 'Weekly goals' }),
+    el('p', { class: 'muted', text: 'Leave a box empty for no goal.' }),
+    KPI_METRICS.filter(([k]) => k !== 'rate').map(([k, label]) => { inputs[k] = el('input', { type: 'number', min: 0, value: T[k] ?? '' }); return el('label', { class: 'f' }, label + ' per week', inputs[k]) }),
+    el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'submit' }, 'Save goals')))
+  DRAWER.kind = null; showDrawer(form)
+}
+/* One-tap milestones on a contact (count toward KPIs, don't change the follow-up date) */
+function milestoneBar(c) {
+  const log = async (btn, label) => {
+    const extra = prompt(`${label} — add a note (optional)`, '')
+    if (extra === null) return
+    btn.disabled = true
+    const { error } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: ymd(today()), notes: label + (extra.trim() ? ' — ' + extra.trim() : '') })
+    if (error) { toast(error.message); btn.disabled = false; return }
+    if (label === 'Listing signed') for (const p of propsFor(c.id).filter(p => p.stage !== 'Dead')) await sb.from('properties').update({ stage: 'Listing', stage_updated_at: nowIso() }).eq('id', p.id)
+    if (label === 'Strategic analysis delivered') for (const p of propsFor(c.id).filter(p => ['Prospect', 'Contacted', 'Meeting'].includes(p.stage))) await sb.from('properties').update({ stage: 'BOV', stage_updated_at: nowIso() }).eq('id', p.id)
+    await Promise.all([loadTable('conversations'), loadTable('properties')])
+    toast(label + ' logged'); render({ soft: true }); refreshDrawer(true)
+  }
+  return el('div', { class: 'milestones' },
+    el('span', { class: 'muted', text: 'Milestones:' }),
+    Object.values(KPI_KINDS).map(label => el('button', { class: 'btn small', onclick: e => log(e.currentTarget, label) }, '+ ' + label)))
 }
 
 boot()
