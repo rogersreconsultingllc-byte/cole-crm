@@ -1859,8 +1859,8 @@ function convKind(n) {
 }
 const KPI = { week: null, calls: null, loading: false, from: null }
 const KPI_METRICS = [
-  ['dials', 'Calls (working #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'],
-  ['vm', 'Voicemails left'], ['bad', 'Bad numbers (not counted)'], ['mset', 'Meetings set'], ['mheld', 'Meetings attended'],
+  ['dials', 'Calls (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'],
+  ['vm', 'Voicemails left'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings attended'],
   ['bov', 'Proposals (strategic analyses)'], ['listing', 'Exclusives'], ['newc', 'New contacts'],
 ]
 function _unusedKpiTargets() { let t = {}; try { t = JSON.parse(localStorage.getItem('kpiTargets') || '{}') } catch { } ; return Object.fromEntries(KPI_METRICS.map(([k, , d]) => [k, t[k] ?? d])) }
@@ -1879,12 +1879,13 @@ async function loadKpiCalls(from) {
 }
 const nyDay = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
 function kpiDay(day) {
-  const m = { dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
+  const m = { total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
   const ppl = new Set()
   for (const c of KPI.calls || []) {
     if (nyDay(c.called_at) !== day) continue
     const o = c.outcome || ''
     if (/^(undo|talked)/i.test(o)) continue // conversions are counted from the contact's conversation
+    m.total++ // every dial, bad numbers included — total effort
     if (/^(wrong number|disconnected)/i.test(o)) { m.bad++; continue } // bad numbers don't count toward the dial goal
     m.dials++; ppl.add('p' + c.prospect_id)
     if (/^(reached|do not call|spoke)/i.test(o)) m.connects++
@@ -1941,7 +1942,7 @@ function kpiView() {
         WEEK_GOALS[k] ? el('span', { text: WEEK_GOALS[k].map((g, i) => `${TIER[i]} ${+g.toFixed(1)}`).join(' · ') }) : null,
         el('span', { class: 'muted', text: `${k === 'rate' ? (d >= 0 ? '+' : '') + (d * 100).toFixed(1) + ' pts' : (d >= 0 ? '+' : '') + d} vs last wk` })))
   })
-  const rowsDef = [['dials', 'Dials (working #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers (not counted)'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts']]
+  const rowsDef = [['dials', 'Dials (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts']]
   const perDay = weekDays.map(d => { const m = kpiDay(d); m.rate = m.dials ? m.connects / m.dials : 0; return m })
   const daily = el('table', { class: 'kpi-table' },
     el('thead', null, el('tr', null, el('th', { text: '' }), weekDays.map(d => el('th', { text: fmt(d, { weekday: 'short', month: 'numeric', day: 'numeric' }) })), el('th', { text: 'Week' }))),
