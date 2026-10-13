@@ -1814,7 +1814,7 @@ const WORK_WEEKS = 50
 // Weekly tiers: calls straight from Cole's plan; meetings/proposals = annual goal ÷ 50 working weeks
 const WEEK_GOALS = { dials: [200, 250, 300], mheld: [2, 2.4, 3.2], mset: [2, 2.4, 3.2], bov: [1, 1.2, 1.6] }
 const TIER = ['Floor', 'Target', 'Game']
-const goalYearStart = () => { try { return localStorage.getItem('goalYearStart') || '2026-10-01' } catch { return '2026-10-01' } }
+const goalYearStart = () => { try { return localStorage.getItem('goalYearStart') || '2026-09-23' } catch { return '2026-09-23' } }
 function convKind(n) {
   const t = String(n || '').trim(), l = t.toLowerCase()
   if (/^(no answer|didnt answer|didn't answer)/.test(l) || /^called \(.*no answer/.test(l)) return 'na'
