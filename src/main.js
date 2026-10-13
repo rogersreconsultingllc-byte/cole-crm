@@ -1886,7 +1886,7 @@ function kpiDay(day) {
     const o = c.outcome || ''
     if (/^(undo|talked)/i.test(o)) continue // conversions are counted from the contact's conversation
     m.dials++; ppl.add('p' + c.prospect_id)
-    if (/^(reached|do not call)/i.test(o)) m.connects++
+    if (/^(reached|do not call|spoke)/i.test(o)) m.connects++
     else if (/^left voicemail/i.test(o)) m.vm++
     else if (/^no answer/i.test(o)) m.na++
     else if (/^(wrong number|disconnected)/i.test(o)) m.bad++
