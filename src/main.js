@@ -1410,7 +1410,7 @@ async function loadProspects() {
   else if (P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
   if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
-  if (P.status === 'tocall') q = q.order('next_attempt_on', { ascending: true, nullsFirst: true }).order('own_rank').order('attempts').order('owner_name')
+  if (P.status === 'tocall') q = q.order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
   else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
@@ -1462,7 +1462,7 @@ function prospectsView() {
               ownTag(r),
               r.other_properties?.length ? el('span', { class: 'tag', text: `+${r.other_properties.length} bldg` }) : null,
               r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
-              due ? el('span', { class: 'late', text: 'retry due' }) : null),
+              due && r.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
             el('div', { class: 'sub', text: [r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
           best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
       })) : el('div', { class: 'empty', text: P.loaded ? 'No prospects match.' : 'Loading…' })),
