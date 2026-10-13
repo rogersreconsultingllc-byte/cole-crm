@@ -1382,8 +1382,8 @@ function openBuyerForm(b = {}) {
 /* ---------- Prospects (owners not yet talked to) ---------- */
 const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
-const P_STATUS = { tocall: ['New', 'Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
-const P_STATUS_LABEL = { tocall: 'To call', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const P_STATUS = { tocall: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
+const P_STATUS_LABEL = { tocall: 'To call', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
 const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Verified owner', ['Owner match', 'Company match']], unverified: ['Owner not confirmed', ['Different owner', 'Not checked', 'Not found']], public: ['Public/institutional', ['Public/institution']], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
@@ -1401,11 +1401,18 @@ async function loadProspects() {
   let q = sb.from('prospects').select('*, prospect_phones(*)', { count: 'exact' })
   if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
   if (P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
+  const T0 = ymd(today())
+  // To call = due now (never called, or retry date is today or earlier); called today and scheduled callbacks have their own tabs
+  if (P.status === 'tocall') q = q.lte('next_attempt_on', T0)
+  if (P.status === 'later') q = q.gt('next_attempt_on', T0)
+  if (P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
   if (P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
   else if (P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
   if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
   if (P.status === 'tocall') q = q.order('next_attempt_on', { ascending: true, nullsFirst: true }).order('own_rank').order('attempts').order('owner_name')
+  else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
+  else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
   q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
   const { data, error, count } = await q
@@ -1635,7 +1642,7 @@ function openProspectForm(r = {}) {
     if (!row.county && row.city) row.county = CITY_COUNTY[norm(row.city)] || null
     let id = r.id
     if (editing) { const { error } = await sb.from('prospects').update(row).eq('id', id); if (error) { err.textContent = error.message; return } }
-    else { row.source = 'Added by hand'; const { data, error } = await sb.from('prospects').insert(row).select('id').single(); if (error) { err.textContent = error.message; return } id = data.id }
+    else { row.source = 'Added by hand'; row.next_attempt_on = ymd(today()); const { data, error } = await sb.from('prospects').insert(row).select('id').single(); if (error) { err.textContent = error.message; return } id = data.id }
     const list = phones.value.split(/[,;\n]/).map(x => x.trim()).filter(x => x.replace(/\D/g, '').length >= 7)
     if (list.length) await sb.from('prospect_phones').upsert(list.map(p => ({ prospect_id: id, phone: fmtPhone(p) })), { onConflict: 'prospect_id,digits', ignoreDuplicates: true })
     refreshProspects(); openProspect(id)
@@ -1757,7 +1764,7 @@ async function runImport(rows, map, phoneCols, source, status) {
   let done = 0, phonesAdded = 0
   for (let i = 0; i < items.length; i += 250) {
     const chunk = items.slice(i, i + 250)
-    const { data, error } = await sb.from('prospects').insert(chunk.map(x => x.row)).select('id')
+    const { data, error } = await sb.from('prospects').insert(chunk.map(x => ({ ...x.row, next_attempt_on: x.row.next_attempt_on || ymd(today()) }))).select('id')
     if (error) throw error
     const ph = []
     data.forEach((d, j) => chunk[j].phones.forEach(p => ph.push({ prospect_id: d.id, phone: p })))
