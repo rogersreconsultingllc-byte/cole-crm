@@ -1488,16 +1488,23 @@ function prospectDetail(r) {
   const newPhone = el('input', { type: 'tel', placeholder: 'Add a number' })
   const phoneRow = ph => {
     const act = (label, outcome, statusTo) => el('button', { class: 'btn small' + (ph.status === statusTo ? ' on' : ''), onclick: e => { e.target.disabled = true; recordAttempt(r, ph, outcome, statusTo, notes.value.trim()) } }, label)
+    const lastNote = (r.prospect_calls || []).filter(c => c.phone_id === ph.id && c.notes).sort((a, b) => String(b.called_at).localeCompare(String(a.called_at)))[0]
     return el('div', { class: 'pphone' + (PHONE_BAD.includes(ph.status) ? ' dead' : '') },
       el('div', { class: 'pp-top' },
         el('a', { class: 'tel', href: telHref(ph.phone), text: ph.phone }),
         ph.phone_type ? el('span', { class: 'muted', text: ph.phone_type }) : null,
         el('span', { class: 'ptag ' + slug(ph.status), text: ph.status }),
         ph.attempts ? el('span', { class: 'muted', style: 'font-size:12px', text: `${ph.attempts}×${ph.last_called_at ? ' · last ' + fmt(ph.last_called_at.slice(0, 10)) : ''}` }) : null),
+      lastNote ? el('div', { class: 'pp-note', text: `📝 ${fmt(String(lastNote.called_at).slice(0, 10))}: ${lastNote.notes}` }) : null,
       el('div', { class: 'pp-acts' },
         act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
+        el('button', { class: 'btn small', title: 'Someone answered (office line, receptionist, partner…) but not a lead — log it with a note', onclick: e => {
+          const n = prompt(`Talked on ${ph.phone} — who did you speak with / what did they say?`, '')
+          if (n === null) return
+          e.target.disabled = true; recordAttempt(r, ph, 'Spoke — office line', 'Good', n.trim())
+        } }, 'Spoke (note)'),
         ph.status !== 'Untested' && ph.status !== 'Good' ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓')))
   }
