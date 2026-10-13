@@ -1540,14 +1540,15 @@ function prospectDetail(r) {
       el('button', { class: 'btn', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
-      el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit')),
+      el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit'),
+      el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => goNextProspect(r) }, 'Next owner →')),
     calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
       el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
 }
 
 async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const now = nowIso(), T = today()
-  const phones = (r.prospect_phones || []).map(x => x.id === ph.id ? { ...x, status: phoneStatus } : x)
+  const phones = (r.prospect_phones || []).map(x => x.id === ph.id ? { ...x, status: phoneStatus, last_called_at: now } : x)
   const liveLeft = phones.filter(x => !PHONE_BAD.includes(x.status))
   const attempts = (r.attempts || 0) + 1
   let status = 'Attempted', next = ymd(addBusinessDays(T, outcome === 'Left voicemail' ? 2 : 1))
@@ -1559,8 +1560,20 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
     sb.from('prospects').update({ status, attempts, last_attempt_at: now, next_attempt_on: next, updated_at: now }).eq('id', r.id),
   ])
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
-  toast(status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`)
-  refreshProspects(); openProspect(r.id)
+  const msg = status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`
+  // Every number on the card tried today (or dead)? Move straight to the next owner in the list.
+  const todayStr = ymd(T)
+  const cardDone = phones.every(x => PHONE_BAD.includes(x.status) || (x.last_called_at && ymd(new Date(x.last_called_at)) === todayStr))
+  if (cardDone) return goNextProspect(r, msg)
+  toast(msg); refreshProspects(); openProspect(r.id)
+}
+// Open the owner that comes after this one in the current list (captured before the list refreshes)
+async function goNextProspect(r, msg) {
+  const i = P.rows.findIndex(x => x.id === r.id)
+  const next = P.rows.slice(i + 1).find(x => x.id !== r.id) || P.rows.find(x => x.id !== r.id)
+  await refreshProspects()
+  if (next) { toast((msg ? msg + ' · ' : '') + `Next: ${next.owner_name}`); openProspect(next.id) }
+  else { toast((msg ? msg + ' · ' : '') + 'That was the last one on this page'); closeDrawer() }
 }
 async function resetPhone(r, ph) {
   const now = nowIso()
@@ -1577,7 +1590,7 @@ async function setProspectStatus(r, status, outcome) {
   await sb.from('prospect_calls').insert({ prospect_id: r.id, outcome })
   const { error } = await sb.from('prospects').update({ status, next_attempt_on: null, last_attempt_at: now, updated_at: now }).eq('id', r.id)
   if (error) { toast(error.message); return }
-  toast(`${r.owner_name}: ${status}`); refreshProspects(); openProspect(r.id)
+  goNextProspect(r, `${r.owner_name}: ${status}`)
 }
 
 /* Talked → becomes a real contact */
