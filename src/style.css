@@ -330,3 +330,8 @@ ul.plain li:last-child { border-bottom: 0; }
 .kpi-table td.tot, .kpi-table .cur { font-weight: 700; }
 .kpi-table td.hit { color: #2e9c6a; } .kpi-table td.miss { color: #c24d4d; } .kpi-table td.pace { color: #b8862b; }
 .milestones { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-size: 13px; }
+.kpi.game { border-left-color: #c9a227; background: linear-gradient(90deg, rgba(201,162,39,.08), transparent 60%); }
+.kpi-table td.game { color: #a8861c; }
+.ybar { position: relative; height: 8px; min-width: 120px; background: var(--line, rgba(0,0,0,.08)); border-radius: 4px; }
+.ybar i { position: absolute; left: 0; top: 0; bottom: 0; background: #3fb27f; border-radius: 4px; }
+.ybar b { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--muted, #6b7280); transform: translateX(-1px); }
