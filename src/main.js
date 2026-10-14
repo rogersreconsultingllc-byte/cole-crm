@@ -80,6 +80,8 @@ const telHref = p => {
   const e164 = '+' + (d.length === 10 ? '1' + d : d)
   return (callWith() === 'webex' ? 'webextel:' : 'tel:') + e164
 }
+const smsHref = p => { const d = String(p || '').replace(/\D/g, ''); return d ? 'sms:+' + (d.length === 10 ? '1' + d : d) : null }
+const isText = n => /^text (sent|received)/i.test(String(n || '').trim())
 const mapsHref = q => q ? 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q) : null
 const addrOf = x => x.address_query || [x.address, x.city, 'FL'].filter(Boolean).join(', ')
 const slug = s => String(s).toLowerCase().replace(/&/g, ' ').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'contact'
@@ -968,7 +970,7 @@ function outcomeBar(c, notesField) {
 
 /* ---------- Contact drawer ---------- */
 function contactDetail(c) {
-  const tel = telHref(c.phone), hist = convosFor(c.id), props = propsFor(c.id)
+  const tel = telHref(c.phone), all = convosFor(c.id), hist = all.filter(v => !isText(v.notes)), texts = all.filter(v => isText(v.notes)), props = propsFor(c.id)
   const talked = el('input', { type: 'date', value: ymd(today()), oninput: markDirty })
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?', oninput: markDirty })
   const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: (c.priority || 'C') === p })))
@@ -992,7 +994,8 @@ function contactDetail(c) {
     el('div', { class: 'actions', style: 'margin-top:8px' },
       c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,
       el('span', { class: 'muted', style: 'font-size:13px', text: (CADENCE[c.priority] || CADENCE.C).label + ' follow-up' }),
-      tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + c.phone) : null),
+      tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + c.phone) : null,
+      smsHref(c.phone) ? el('a', { class: 'btn small', href: smsHref(c.phone) }, 'Text') : null),
     el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Next call' }), el('b', { text: fmt(c.next_follow_up, LONG) + (c.next_follow_up ? ' · ' + (c.next_time ? fmtTime(c.next_time) : 'first call block') : '') }), c.next_note ? el('div', { text: c.next_note }) : null),
     el('div', { class: 'section-title', text: 'How did the call go?' }),
     pitchTip(),
@@ -1017,10 +1020,46 @@ function contactDetail(c) {
       el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Next call', nextDate)),
       el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next step', nextStep), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
       logErr, el('div', { class: 'actions' }, save)),
+    textSection(c, texts),
     el('h4', { text: `Conversation history (${hist.length})` }),
     hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', null, el('div', { class: 'date', text: fmt(v.talked_on, LONG) }), el('div', { class: 'txt', text: v.notes }))))
       : el('p', { class: 'muted', text: 'No conversations logged yet.' }),
     el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact')))
+}
+
+/* ---------- Texts (logged as conversations starting "Text sent:" / "Text received:") ---------- */
+function textSection(c, texts) {
+  const box = el('textarea', { rows: 2, placeholder: 'Paste or type the text…', oninput: markDirty })
+  const day = el('input', { type: 'date', value: ymd(today()) })
+  const err = el('div', { class: 'err' })
+  const save = async (btn, dir) => {
+    const t = box.value.trim(); if (!t) { err.textContent = 'Type the text first.'; return }
+    btn.disabled = true; err.textContent = ''
+    try {
+      const { error } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: day.value || ymd(today()), notes: `Text ${dir}: ${t}` })
+      if (error) throw error
+      if (dir === 'received' && (!c.last_contact || c.last_contact < day.value)) await sb.from('contacts').update({ last_contact: day.value, updated_at: nowIso() }).eq('id', c.id)
+      await Promise.all([loadTable('conversations'), loadTable('contacts')])
+      box.dataset.dirty = ''; toast(dir === 'sent' ? 'Text logged' : 'Reply logged'); render({ soft: true }); refreshDrawer(true)
+    } catch (x) { err.textContent = 'Couldn’t save: ' + (x.message || x); btn.disabled = false }
+  }
+  const sms = smsHref(c.phone)
+  const thread = [...texts].sort((a, b) => String(a.talked_on).localeCompare(String(b.talked_on)) || a.id - b.id)
+  return el('div', { class: 'box stack texts' },
+    el('h4', { text: `Texts (${texts.length})` }),
+    thread.length ? el('div', { class: 'sms-thread' }, thread.map(v => {
+      const inbound = /^text received/i.test(v.notes)
+      return el('div', { class: 'sms ' + (inbound ? 'in' : 'out') },
+        el('div', { class: 'sms-meta', text: (inbound ? (c.name.split(' ')[0]) : 'You') + ' · ' + fmt(v.talked_on, { month: 'short', day: 'numeric' }) }),
+        el('div', { text: String(v.notes).replace(/^text (sent|received):\s*/i, '') }))
+    })) : el('p', { class: 'muted', text: 'No texts logged yet.' }),
+    box,
+    el('div', { class: 'actions' },
+      el('button', { class: 'btn primary small', onclick: e => save(e.currentTarget, 'sent') }, 'Log text I sent'),
+      el('button', { class: 'btn small', onclick: e => save(e.currentTarget, 'received') }, 'Log their reply'),
+      sms ? el('a', { class: 'btn small ghost', href: sms, onclick: () => { if (box.value.trim()) navigator.clipboard?.writeText(box.value.trim()).catch(() => {}) } }, 'Open Messages') : null,
+      el('label', { class: 'f', style: 'margin-left:auto;max-width:150px' }, 'Date', day)),
+    err)
 }
 
 /* ---------- Property drawer ---------- */
@@ -1852,6 +1891,8 @@ function convKind(n) {
   if (/^(listing signed|exclusive listing signed|exclusive signed)/.test(l)) return 'listing'
   if (/^contract signed/.test(l)) return 'contract'
   if (/^deal closed/.test(l)) return 'closed'
+  if (/^text sent/.test(l)) return 'texts'
+  if (/^text received/.test(l)) return 'textin'
   if (/^(sent |replied|he emailed|she emailed|emailed)/.test(l)) return 'email'
   if (/^(ownership note|added to crm|going over the building|follow up on bov|workign with|working with|cole confirmed|played pickleball|arrived late|note:)/.test(l)) return 'note'
   if (l === 'called') return 'dial'
@@ -1861,7 +1902,7 @@ const KPI = { week: null, calls: null, loading: false, from: null }
 const KPI_METRICS = [
   ['dials', 'Calls (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'],
   ['vm', 'Voicemails left'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings attended'],
-  ['bov', 'Proposals (strategic analyses)'], ['listing', 'Exclusives'], ['newc', 'New contacts'],
+  ['bov', 'Proposals (strategic analyses)'], ['listing', 'Exclusives'], ['newc', 'New contacts'], ['texts', 'People texted'], ['textin', 'Text replies'],
 ]
 function _unusedKpiTargets() { let t = {}; try { t = JSON.parse(localStorage.getItem('kpiTargets') || '{}') } catch { } ; return Object.fromEntries(KPI_METRICS.map(([k, , d]) => [k, t[k] ?? d])) }
 const monday = d => { const x = new Date(d); const w = (x.getDay() + 6) % 7; x.setDate(x.getDate() - w); x.setHours(0, 0, 0, 0); return x }
@@ -1879,7 +1920,7 @@ async function loadKpiCalls(from) {
 }
 const nyDay = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
 function kpiDay(day) {
-  const m = { total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
+  const m = { texts: 0, textin: 0, total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
   const ppl = new Set()
   for (const c of KPI.calls || []) {
     if (nyDay(c.called_at) !== day) continue
@@ -1942,7 +1983,7 @@ function kpiView() {
         WEEK_GOALS[k] ? el('span', { text: WEEK_GOALS[k].map((g, i) => `${TIER[i]} ${+g.toFixed(1)}`).join(' · ') }) : null,
         el('span', { class: 'muted', text: `${k === 'rate' ? (d >= 0 ? '+' : '') + (d * 100).toFixed(1) + ' pts' : (d >= 0 ? '+' : '') + d} vs last wk` })))
   })
-  const rowsDef = [['dials', 'Dials (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts']]
+  const rowsDef = [['dials', 'Dials (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts'], ['texts', 'People texted'], ['textin', 'Text replies']]
   const perDay = weekDays.map(d => { const m = kpiDay(d); m.rate = m.dials ? m.connects / m.dials : 0; return m })
   const daily = el('table', { class: 'kpi-table' },
     el('thead', null, el('tr', null, el('th', { text: '' }), weekDays.map(d => el('th', { text: fmt(d, { weekday: 'short', month: 'numeric', day: 'numeric' }) })), el('th', { text: 'Week' }))),
