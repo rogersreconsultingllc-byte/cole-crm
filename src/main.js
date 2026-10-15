@@ -313,8 +313,29 @@ function todayView() {
 const stat = (n, label, onclick) => el('div', { class: 'card stat' + (onclick ? ' click' : ''), onclick }, el('b', { text: n }), el('span', { text: label }))
 
 /* ---------- Contacts ---------- */
+// Phone search: "941-628-2030", "(941) 628 2030", "6282030", "+1 941…" all match the same number
+function phoneQuery(q) {
+  if (!/^[\d\s()+.\-]+$/.test(q || '')) return null
+  let d = q.replace(/\D/g, '')
+  if (d.length === 11 && d[0] === '1') d = d.slice(1)
+  return d.length >= 4 ? d : null
+}
+const digitsOf = s => String(s || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')
+const phoneLike = d => '*' + d.split('').join('*') + '*'
+// Prospects with a matching number (any of their numbers) — shown under Contacts results
+const PHQ = { q: null, rows: [], busy: false }
+async function findProspectsByPhone(d) {
+  if (PHQ.q === d) return
+  PHQ.q = d; PHQ.busy = true; PHQ.rows = []
+  const { data } = await sb.from('prospect_phones').select('phone, status, prospects(id, owner_name, company, property_address, city, status)').ilike('phone', phoneLike(d)).limit(25)
+  if (PHQ.q !== d) return
+  PHQ.busy = false; PHQ.rows = (data || []).filter(r => r.prospects && digitsOf(r.phone).includes(d))
+  if (S.tab === 'contacts') render({ soft: true })
+}
 function matches(c, q) {
   if (!q) return true
+  const pd = phoneQuery(q.trim())
+  if (pd) return digitsOf(c.phone).includes(pd)
   const hay = [c.name, c.company, c.phone, c.email, c.address, c.address_query, c.city, c.county, c.notes, c.next_note, c.contact_type,
     ...convosFor(c.id).map(v => v.notes), ...propsFor(c.id).map(p => [p.address, p.name, p.notes, p.stage, p.product_type].join(' '))].join(' ').toLowerCase()
   return q.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w))
@@ -330,7 +351,21 @@ function contactsView() {
       ['A', 'B', 'C'].map(p => el('button', { class: 'chip' + (S.pri.has(p) ? ' on' : ''), onclick: () => { S.pri.has(p) ? S.pri.delete(p) : S.pri.add(p); render() } }, p)),
       el('select', { class: 'chip', onchange: e => { S.type = e.target.value; render() } },
         el('option', { value: '', text: 'All types' }), TYPES.map(t => el('option', { value: t, text: t, selected: S.type === t })))),
-    el('div', { class: 'card' }, list.length ? el('ul', { class: 'list' }, list.map(c => contactRow(c))) : el('div', { class: 'empty', text: 'No matches.' })))
+    el('div', { class: 'card' }, list.length ? el('ul', { class: 'list' }, list.map(c => contactRow(c))) : el('div', { class: 'empty', text: 'No matches.' })),
+    phoneMatchesCard())
+}
+function phoneMatchesCard() {
+  const d = phoneQuery((S.q || '').trim())
+  if (!d) { PHQ.q = null; return null }
+  findProspectsByPhone(d)
+  return el('div', null,
+    el('div', { class: 'section-title', text: 'Prospects with this number' }),
+    el('div', { class: 'card' }, PHQ.busy ? el('div', { class: 'empty', text: 'Searching prospects…' }) :
+      PHQ.rows.length ? el('ul', { class: 'list' }, PHQ.rows.map(r => el('li', { class: 'item', onclick: () => { S.tab = 'prospects'; render(); openProspect(r.prospects.id) } },
+        el('div', null,
+          el('b', { text: r.prospects.owner_name || r.prospects.company || 'Unknown owner' }),
+          el('div', { class: 'muted', text: [r.phone + (r.status && r.status !== 'Untested' ? ' · ' + r.status : ''), r.prospects.company, [r.prospects.property_address, r.prospects.city].filter(Boolean).join(', '), r.prospects.status].filter(Boolean).join(' · ') }))))) :
+      el('div', { class: 'empty', text: 'No prospects with this number.' })))
 }
 
 /* ---------- Buyer matching ---------- */
@@ -1447,8 +1482,14 @@ async function loadProspects() {
   if (P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
   if (P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
   else if (P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
+  const pd = phoneQuery(P.q.trim())
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
-  if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
+  if (pd) {
+    const { data: hits } = await sb.from('prospect_phones').select('prospect_id, phone').ilike('phone', phoneLike(pd)).limit(1000)
+    if (my !== P.reqId) return
+    const ids = [...new Set((hits || []).filter(h => digitsOf(h.phone).includes(pd)).map(h => h.prospect_id))]
+    q = q.in('id', ids.length ? ids : [-1])
+  } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
   if (P.status === 'tocall') q = q.order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
   else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
@@ -1467,7 +1508,7 @@ function prospectsView() {
   const totalAll = P.counts.reduce((s, c) => s + Number(c.total), 0)
   const toCallAll = P.counts.reduce((s, c) => s + Number(c.to_call), 0)
   const T = ymd(today())
-  const search = el('input', { class: 'search', type: 'search', placeholder: 'Search owner, company, address, city…', value: P.q, 'data-keep': 'pq2',
+  const search = el('input', { class: 'search', type: 'search', placeholder: 'Search owner, company, address, city, phone…', value: P.q, 'data-keep': 'pq2',
     oninput: e => { P.q = e.target.value; clearTimeout(P.searchTimer); P.searchTimer = setTimeout(() => { P.page = 0; refreshProspects() }, 300) } })
   const pages = Math.max(1, Math.ceil(P.total / P_PAGE))
   return el('div', null,
