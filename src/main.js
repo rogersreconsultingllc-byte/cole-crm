@@ -1473,15 +1473,16 @@ async function loadProspects() {
   const my = ++P.reqId
   P.loading = true
   let q = sb.from('prospects').select('*, prospect_phones(*)', { count: 'exact' })
-  if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
-  if (P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
+  const byPhone = !!phoneQuery(P.q.trim()) // a phone search looks across every prospect, ignoring tabs and filters
+  if (byPhone) { /* filters skipped below */ } else if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
+  if (!byPhone && P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
   const T0 = ymd(today())
   // To call = due now (never called, or retry date is today or earlier); called today and scheduled callbacks have their own tabs
-  if (P.status === 'tocall') q = q.lte('next_attempt_on', T0)
-  if (P.status === 'later') q = q.gt('next_attempt_on', T0)
-  if (P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
-  if (P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
-  else if (P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
+  if (!byPhone && P.status === 'tocall') q = q.lte('next_attempt_on', T0)
+  if (!byPhone && P.status === 'later') q = q.gt('next_attempt_on', T0)
+  if (!byPhone && P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
+  if (!byPhone && P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
+  else if (!byPhone && P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
   const pd = phoneQuery(P.q.trim())
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
   if (pd) {
