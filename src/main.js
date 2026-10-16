@@ -1059,7 +1059,8 @@ function contactDetail(c) {
     el('h4', { text: `Conversation history (${hist.length})` }),
     hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', null, el('div', { class: 'date', text: fmt(v.talked_on, LONG) }), el('div', { class: 'txt', text: v.notes }))))
       : el('p', { class: 'muted', text: 'No conversations logged yet.' }),
-    el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact')))
+    el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact'),
+      el('button', { class: 'btn danger', style: 'margin-left:auto', onclick: e => deleteContact(c, e.currentTarget) }, 'Delete contact')))
 }
 
 /* ---------- Texts (logged as conversations starting "Text sent:" / "Text received:") ---------- */
@@ -1300,6 +1301,23 @@ function openPropertyForm(p = {}) {
     err, el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => editing ? openProperty(p.id) : closeDrawer() }, 'Cancel')))
   DRAWER.kind = null
   showDrawer(form)
+}
+/* Permanently delete a contact with their logged conversations and linked properties */
+async function deleteContact(c, btn) {
+  const nConv = convosFor(c.id).length, nProp = propsFor(c.id).length
+  const extra = [nConv ? `${nConv} conversation${nConv > 1 ? 's' : ''}` : '', nProp ? `${nProp} propert${nProp > 1 ? 'ies' : 'y'}` : ''].filter(Boolean).join(' and ')
+  if (!confirm(`Delete ${c.name}${extra ? ' and their ' + extra : ''}? This can't be undone.`)) return
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting…' }
+  for (const t of ['conversations', 'properties']) {
+    const { error } = await sb.from(t).delete().eq('contact_id', c.id)
+    if (error) { toast(error.message); if (btn) { btn.disabled = false; btn.textContent = 'Delete contact' } return }
+  }
+  const { error } = await sb.from('contacts').delete().eq('id', c.id)
+  if (error) { toast(error.message); if (btn) { btn.disabled = false; btn.textContent = 'Delete contact' } return }
+  S.contacts = S.contacts.filter(x => x.id !== c.id)
+  S.convos && (S.convos = S.convos.filter(x => x.contact_id !== c.id))
+  S.props && (S.props = S.props.filter(x => x.contact_id !== c.id))
+  closeDrawer(); toast(`${c.name} deleted`); loadAll().then(() => render({ soft: true })).catch(() => render({ soft: true }))
 }
 function openContactForm(c = {}) {
   const editing = !!c.id
