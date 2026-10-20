@@ -349,3 +349,16 @@ ul.plain li:last-child { border-bottom: 0; }
 .btn.danger { color: #c24d4d; border-color: rgba(194,77,77,.45); }
 .btn.danger:hover { background: rgba(194,77,77,.1); }
 @media (prefers-color-scheme: dark) { .btn.danger { color: #ff8a8a; border-color: rgba(255,138,138,.45); } }
+
+/* Meetings tab + KPI drill-down */
+.kpi.click, tr.click { cursor: pointer; }
+.kpi.click:hover { outline: 2px solid var(--ink); outline-offset: -1px; }
+tr.click:hover td { background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.meetcard { padding: 14px; }
+.mc-head { display: flex; align-items: center; gap: 10px; }
+.mc-head .name { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mc-props { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.mc-props .chip { font-size: 12px; padding: 4px 9px; }
+.mc-notes { white-space: pre-wrap; margin-top: 10px; font-size: 14px; line-height: 1.45; border-left: 3px solid var(--line); padding-left: 10px; }
+.mc-notes.extra { color: var(--muted); font-size: 13px; }
+.hidden { display: none !important; }

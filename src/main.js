@@ -230,7 +230,7 @@ function deniedView() {
 }
 
 /* ---------- Shell ---------- */
-const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['kpis', 'KPIs']]
+const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['meetings', 'Meetings'], ['kpis', 'KPIs']]
 function dueCount() { const T = ymd(today()); return S.contacts.filter(c => c.next_follow_up && c.next_follow_up <= T).length }
 
 function render({ soft } = {}) {
@@ -251,7 +251,7 @@ function render({ soft } = {}) {
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })
-  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, kpis: kpiView }[S.tab] || todayView
+  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, meetings: meetingsView, kpis: kpiView }[S.tab] || todayView
   const active = document.activeElement
   const focused = soft && active && active.dataset && active.dataset.keep
   const caret = focused ? active.selectionStart : null
@@ -1035,6 +1035,7 @@ function contactDetail(c) {
     el('div', { class: 'section-title', text: 'How did the call go?' }),
     pitchTip(),
     outcomeBar(c, notes),
+    el('button', { class: 'btn small primary', style: 'margin-top:10px', onclick: () => openMeetingForm({ contactId: c.id }) }, '📝 Log meeting notes'),
     milestoneBar(c),
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
@@ -2036,8 +2037,9 @@ function kpiView() {
   }
   const cards = KPI_METRICS.filter(([k]) => !['na', 'listing'].includes(k)).map(([k, label]) => {
     const v = tot[k] || 0, st = status(k, v), d = (v - (prev[k] || 0))
-    return el('div', { class: 'kpi ' + st },
-      el('div', { class: 'kpi-l', text: label }),
+    const drill = MEET_KINDS[k] ? () => openMeetingList(k, days, `${label} · week of ${fmt(ymd(wk), { month: 'short', day: 'numeric' })}`) : null
+    return el('div', { class: 'kpi ' + st + (drill ? ' click' : ''), onclick: drill, title: drill ? 'Click to see who you met with' : null },
+      el('div', { class: 'kpi-l', text: label + (drill ? '  ›' : '') }),
       el('div', { class: 'kpi-v', text: fmtv(k, v) }),
       el('div', { class: 'kpi-s' },
         WEEK_GOALS[k] ? el('span', { text: WEEK_GOALS[k].map((g, i) => `${TIER[i]} ${+g.toFixed(1)}`).join(' · ') }) : null,
@@ -2089,8 +2091,9 @@ function yearSection() {
     const v = tot[k] || 0, pace = g.map(x => x * frac)
     const st = v >= pace[2] ? 'game' : v >= pace[1] ? 'hit' : v >= pace[0] ? 'pace' : 'miss'
     const w = Math.min(100, v / g[2] * 100)
-    return el('tr', null,
-      el('td', { text: label }),
+    const drill = MEET_KINDS[k] ? () => openMeetingList(k, dayList(start, ndays), `${label} · goal year so far`) : null
+    return el('tr', { class: drill ? 'click' : null, onclick: drill },
+      el('td', { text: label + (drill ? '  ›' : '') }),
       el('td', { class: 'tot ' + st, text: fmtv(k, v) }),
       g.map(x => el('td', { text: fmtv(k, x) })),
       el('td', null, el('div', { class: 'ybar' }, el('i', { style: `width:${w}%` }), g.map(x => el('b', { style: `left:${x / g[2] * 100}%` })))),
@@ -2130,6 +2133,122 @@ function milestoneBar(c) {
   return el('div', { class: 'milestones' },
     el('span', { class: 'muted', text: 'Milestones:' }),
     Object.values(KPI_KINDS).map(label => el('button', { class: 'btn small', onclick: e => log(e.currentTarget, label) }, '+ ' + label)))
+}
+
+/* ---------- Meetings (log meeting notes + KPI drill-down) ---------- */
+const MEET_KINDS = { mheld: 'Meeting held', mset: 'Meeting set' }
+// Every meeting conversation of a kind on the given days — deduped one per contact per day, same as the KPI count
+function meetingsOf(kind, days) {
+  const set = new Set(days), seen = new Set()
+  return [...S.convos]
+    .filter(v => set.has(v.talked_on) && convKind(v.notes) === kind)
+    .sort((a, b) => String(b.talked_on).localeCompare(String(a.talked_on)) || b.id - a.id)
+    .filter(v => { const key = v.contact_id + '|' + v.talked_on; if (seen.has(key)) return false; seen.add(key); return true })
+}
+// The contact's other notes from that meeting (anything else logged the same day), so the card shows the full story
+const sameDayNotes = v => S.convos.filter(x => x.contact_id === v.contact_id && x.talked_on === v.talked_on && x.id !== v.id && !isText(x.notes))
+function meetingCard(v, { kindLabel } = {}) {
+  const c = contactById(v.contact_id)
+  if (!c) return null
+  const tel = telHref(c.phone), props = propsFor(c.id)
+  return el('div', { class: 'card meetcard' },
+    el('div', { class: 'mc-head' },
+      el('span', { class: 'pri ' + (c.priority || 'C'), text: c.priority || 'C' }),
+      el('div', { style: 'flex:1;min-width:0' },
+        el('div', { class: 'name' }, el('b', { text: c.name }), c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null),
+        el('div', { class: 'muted', style: 'font-size:13px', text: [c.company, fmt(v.talked_on, LONG) + (kindLabel ? ' · ' + kindLabel : '')].filter(Boolean).join(' · ') })),
+      tel ? el('a', { class: 'btn small', href: tel, text: c.phone }) : null),
+    props.length ? el('div', { class: 'mc-props' }, props.map(p => el('a', { class: 'chip', onclick: () => openProperty(p.id) }, `${p.address || p.name}${p.stage ? ' · ' + p.stage : ''}`))) : null,
+    el('div', { class: 'mc-notes', text: v.notes }),
+    sameDayNotes(v).map(x => el('div', { class: 'mc-notes extra', text: x.notes })),
+    c.next_follow_up ? el('div', { class: 'muted', style: 'font-size:13px;margin-top:8px', text: `Next: ${fmt(c.next_follow_up, LONG)}${c.next_time ? ' · ' + fmtTime(c.next_time) : ''}${c.next_note ? ' — ' + c.next_note : ''}` }) : null,
+    el('div', { class: 'actions', style: 'margin-top:10px' },
+      el('button', { class: 'btn small primary', onclick: () => openContact(c.id) }, 'Open contact card'),
+      el('button', { class: 'btn small', onclick: () => openMeetingForm({ contactId: c.id }) }, '+ Add meeting notes')))
+}
+// Drawer opened from a KPI: everyone you met with in that period, with their card and the meeting notes
+function openMeetingList(kind, days, title) {
+  const rows = meetingsOf(kind, days)
+  DRAWER.kind = 'meetings'; DRAWER.id = null
+  showDrawer(el('div', null,
+    el('h2', { text: title }),
+    el('p', { class: 'muted', text: rows.length ? `${rows.length} ${rows.length === 1 ? 'person' : 'people'}` : 'No meetings logged in this period.' }),
+    el('div', { class: 'stack' }, rows.map(v => meetingCard(v)))))
+}
+function meetingsView() {
+  const T = ymd(today())
+  const upcoming = S.contacts.filter(c => c.next_follow_up && c.next_follow_up >= T && /^meeting/i.test(c.next_note || '')).sort(byWhen)
+  const all = [...S.convos].filter(v => ['mheld', 'mset'].includes(convKind(v.notes)))
+  const days = [...new Set(all.map(v => v.talked_on))]
+  const held = meetingsOf('mheld', days), set = meetingsOf('mset', days)
+  const [tab, setTab] = [S.meetTab || 'held', t => { S.meetTab = t; render({ soft: true }) }]
+  const list = tab === 'held' ? held : set
+  return el('div', null,
+    el('div', { class: 'head' },
+      el('div', null, el('h1', { text: 'Meetings' }), el('p', { class: 'muted', text: `${held.length} held · ${set.length} set · ${upcoming.length} coming up` })),
+      el('div', { class: 'actions' }, el('button', { class: 'btn primary', onclick: () => openMeetingForm({}) }, '+ Log meeting'))),
+    el('div', { class: 'section-title', text: `Coming up (${upcoming.length})` }),
+    el('div', { class: 'card' }, upcoming.length ? el('ul', { class: 'list' }, upcoming.map(c => contactRow(c))) : el('div', { class: 'empty', text: 'No meetings on the books.' })),
+    el('div', { class: 'filters', style: 'margin-top:18px' },
+      el('button', { class: 'chip' + (tab === 'held' ? ' on' : ''), onclick: () => setTab('held') }, `Meetings held (${held.length})`),
+      el('button', { class: 'chip' + (tab === 'set' ? ' on' : ''), onclick: () => setTab('set') }, `Meetings set (${set.length})`)),
+    el('div', { class: 'stack', style: 'margin-top:10px' }, list.length ? list.map(v => meetingCard(v)) : el('div', { class: 'card empty', text: 'Nothing logged yet — tap “+ Log meeting”.' })))
+}
+function openMeetingForm({ contactId } = {}) {
+  const T = today()
+  const who = contactSelect(contactId || '')
+  who.firstChild.textContent = '— Pick who you met with —'
+  const kind = el('select', null, el('option', { value: 'held', text: 'Meeting held (I met with them)' }), el('option', { value: 'set', text: 'Meeting set (booked for later)' }))
+  const date = el('input', { type: 'date', value: ymd(T) })
+  const time = el('input', { type: 'time' })
+  const where = el('input', { placeholder: 'At the property, their office, Zoom…' })
+  const notes = el('textarea', { rows: 7, placeholder: 'What you learned — goals, timing, debt, tenants, other buildings, buy box, rapport notes…' })
+  const nextDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
+  const nextTime = el('input', { type: 'time' })
+  const nextStep = el('input', { placeholder: 'e.g. Deliver strategic analysis of the building' })
+  const pri = el('select', null, el('option', { value: '', text: 'Keep current' }), ['A', 'B', 'C'].map(p => el('option', { value: p, text: p })))
+  const dateLbl = el('span', { text: 'Date you met' })
+  const nextBox = el('div', { class: 'stack' },
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Follow-up date', nextDate), el('label', { class: 'f' }, 'Time (optional)', nextTime)),
+    el('label', { class: 'f' }, 'Next step', nextStep))
+  kind.onchange = () => {
+    const isSet = kind.value === 'set'
+    dateLbl.textContent = isSet ? 'Meeting date' : 'Date you met'
+    if (isSet && date.value === ymd(T)) date.value = ymd(addBusinessDays(T, 2))
+    nextBox.classList.toggle('hidden', isSet)
+  }
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary', type: 'submit' }, 'Save meeting')
+  const form = el('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault()
+    const c = contactById(who.value)
+    if (!c) { err.textContent = 'Pick who you met with.'; return }
+    const isSet = kind.value === 'set'
+    if (!isSet && !notes.value.trim()) { err.textContent = 'Add your notes from the meeting.'; return }
+    save.disabled = true; err.textContent = ''
+    const t = time.value ? ' at ' + fmtTime(time.value) : ''
+    const place = where.value.trim() ? ' — ' + where.value.trim() : ''
+    const body = notes.value.trim() ? ' — ' + notes.value.trim() : ''
+    try {
+      if (isSet) {
+        const when = `${fmt(date.value, { weekday: 'short', month: 'short', day: 'numeric' })}${t}${place}`
+        await logCall(c, { note: 'Meeting set for ' + when + body, talked: ymd(T), priority: pri.value || c.priority || 'C', next: date.value, nextTime: time.value || null, nextNote: 'MEETING ' + when, meeting: true })
+      } else {
+        await logCall(c, { note: 'Meeting held' + place + body, talked: date.value, priority: pri.value || c.priority || 'C', next: nextDate.value || null, nextTime: nextTime.value || null, nextNote: nextStep.value.trim() || 'Follow up from meeting ' + fmt(date.value), meeting: true })
+      }
+      toast(isSet ? 'Meeting set' : 'Meeting logged'); closeDrawer(); render({ soft: true })
+    } catch (x) { err.textContent = 'Couldn’t save: ' + (x.message || x); save.disabled = false }
+  } },
+    el('h2', { text: 'Log a meeting' }),
+    el('label', { class: 'f' }, 'Who', who),
+    el('label', { class: 'f' }, 'Type', kind),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, dateLbl, date), el('label', { class: 'f' }, 'Time (optional)', time)),
+    el('label', { class: 'f' }, 'Where', where),
+    el('label', { class: 'f' }, 'Meeting notes', notes),
+    el('label', { class: 'f' }, 'Priority', pri),
+    nextBox, err, el('div', { class: 'actions' }, save))
+  DRAWER.kind = 'meetform'; DRAWER.id = null
+  showDrawer(form)
 }
 
 boot()
