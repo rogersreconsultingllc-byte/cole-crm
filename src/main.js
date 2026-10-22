@@ -1574,7 +1574,23 @@ function prospectsView() {
 function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage.setItem('pCounty', P.county) } catch { } P.rows = []; P.loading = true; render({ soft: true }); refreshProspects() }
 
 /* Prospect drawer */
-async function openProspect(id) {
+// Owners you've opened, in order — "Previous owner" walks back through them even after the list re-sorts
+const PHIST = []
+function prevProspectId(id) {
+  const i = PHIST.lastIndexOf(id)
+  if (i > 0) return PHIST[i - 1]
+  const j = P.rows.findIndex(x => x.id === id)
+  return j > 0 ? P.rows[j - 1].id : null
+}
+async function goPrevProspect(r) {
+  const prev = prevProspectId(r.id)
+  if (!prev) { toast('This is the first owner'); return }
+  const i = PHIST.lastIndexOf(r.id)
+  if (i > 0) PHIST.length = i // drop the current one so Previous keeps stepping back
+  await openProspect(prev, { back: true })
+}
+async function openProspect(id, { back } = {}) {
+  if (!back && PHIST[PHIST.length - 1] !== id) { PHIST.push(id); if (PHIST.length > 200) PHIST.shift() }
   const { data, error } = await sb.from('prospects').select('*, prospect_phones(*), prospect_calls(*)').eq('id', id).single()
   if (error) { toast(error.message); return }
   DRAWER.kind = null
@@ -1648,7 +1664,8 @@ function prospectDetail(r) {
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
       el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit'),
-      el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => goNextProspect(r) }, 'Next owner →')),
+      el('button', { class: 'btn', style: 'margin-left:auto', disabled: !prevProspectId(r.id), onclick: () => goPrevProspect(r) }, '← Previous owner'),
+      el('button', { class: 'btn', onclick: () => goNextProspect(r) }, 'Next owner →')),
     calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
       el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
 }
