@@ -1495,7 +1495,7 @@ async function loadProspectCounts() {
   const { data, error } = await sb.rpc('prospect_county_counts')
   if (!error) P.counts = data || []
   // How many owners have never been dialed (respects the county filter) — shown on the "Haven't called" tab
-  let nq = sb.from('prospects').select('id', { count: 'exact', head: true }).in('status', ['New', 'Attempted']).eq('attempts', 0).neq('ownership_check', 'Public/institution')
+  let nq = sb.from('prospects').select('id', { count: 'exact', head: true }).in('status', ['New', 'Attempted']).eq('attempts', 0).or('ownership_check.is.null,ownership_check.neq.Public/institution')
   if (P.county) nq = P.county === 'Unknown' ? nq.is('county', null) : nq.eq('county', P.county)
   const { count } = await nq
   P.neverCount = count ?? null
