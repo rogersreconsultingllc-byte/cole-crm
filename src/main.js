@@ -1517,7 +1517,7 @@ async function loadProspects() {
     const ids = [...new Set((hits || []).filter(h => digitsOf(h.phone).includes(pd)).map(h => h.prospect_id))]
     q = q.in('id', ids.length ? ids : [-1])
   } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
-  if (P.status === 'tocall') q = q.order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
+  if (P.status === 'tocall') q = q.order('callback_note', { ascending: true, nullsFirst: false }).order('next_attempt_on').order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
   else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
@@ -1569,8 +1569,9 @@ function prospectsView() {
               ownTag(r),
               r.other_properties?.length ? el('span', { class: 'tag', text: `+${r.other_properties.length} bldg` }) : null,
               r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
-              due && r.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
-            el('div', { class: 'sub', text: [r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
+              r.callback_note || r.callback_time ? el('span', { class: due ? 'late' : 'tag fu', text: `📅 ${due ? 'follow-up due' : 'follow-up ' + fmt(r.next_attempt_on, { weekday: 'short', month: 'short', day: 'numeric' })}${r.callback_time ? ' · ' + fmtTime(r.callback_time) : ''}` })
+              : due && r.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
+            el('div', { class: 'sub', text: [r.callback_note ? '→ ' + r.callback_note : null, r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
           best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
       })) : el('div', { class: 'empty', text: P.loaded ? 'No prospects match.' : 'Loading…' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
@@ -1636,7 +1637,8 @@ function prospectDetail(r) {
     el('div', { class: 'actions', style: 'margin-top:6px' },
       el('span', { class: 'ptag ' + slug(r.status), text: r.status }),
       r.county ? el('span', { class: 'muted', text: r.county + ' County' }) : null,
-      r.next_attempt_on ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
+      r.next_attempt_on && !(r.callback_note || r.callback_time) ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
+    r.callback_note || r.callback_time ? el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Follow-up' }), el('b', { text: fmt(r.next_attempt_on, LONG) + (r.callback_time ? ' · ' + fmtTime(r.callback_time) : '') }), r.callback_note ? el('div', { text: r.callback_note }) : null) : null,
     el('dl', { class: 'facts' },
       r.title ? [el('dt', { text: 'Title' }), el('dd', { text: r.title })] : null,
       r.company ? [el('dt', { text: 'Company' }), el('dd', { text: r.company })] : null,
@@ -1666,6 +1668,7 @@ function prospectDetail(r) {
         if (r.status === 'Bad data') await sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', updated_at: nowIso() }).eq('id', r.id)
         openProspect(r.id); refreshProspects()
       } }, 'Add number')),
+    prospectFollowUp(r),
     el('div', { class: 'actions', style: 'margin-top:16px' },
       el('button', { class: 'btn', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
@@ -1688,7 +1691,7 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const res = await Promise.all([
     sb.from('prospect_phones').update({ status: phoneStatus, attempts: (ph.attempts || 0) + 1, last_called_at: now }).eq('id', ph.id),
     sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph.id, outcome: `${outcome} (${ph.phone})`, notes: note || null }),
-    sb.from('prospects').update({ status, attempts, last_attempt_at: now, next_attempt_on: next, updated_at: now }).eq('id', r.id),
+    sb.from('prospects').update({ status, attempts, last_attempt_at: now, next_attempt_on: next, callback_time: null, callback_note: null, updated_at: now }).eq('id', r.id),
   ])
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
   const msg = status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`
@@ -1730,9 +1733,11 @@ function openConvert(r, ph) {
   const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === 'B' })))
   const type = el('select', null, TYPES.map(t => el('option', { value: t, text: t, selected: t === 'Seller' })))
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?' })
-  const next = el('input', { type: 'date', value: ymd(addCadence(T, 'B')) })
+  const hasFu = !!(r.callback_note || r.callback_time) && r.next_attempt_on >= ymd(T)
+  const next = el('input', { type: 'date', value: hasFu ? r.next_attempt_on : ymd(addCadence(T, 'B')) })
   pri.onchange = () => { next.value = ymd(addCadence(T, pri.value)) }
-  const nextNote = el('input', { placeholder: 'Next step' })
+  const nextTime = el('input', { type: 'time', value: hasFu && r.callback_time ? String(r.callback_time).slice(0, 5) : '' })
+  const nextNote = el('input', { placeholder: 'Next step', value: hasFu ? r.callback_note || '' : '' })
   const err = el('div', { class: 'err' })
   const save = el('button', { class: 'btn primary', type: 'submit' }, 'Save as contact')
   const form = el('form', { class: 'stack', onsubmit: async e => {
@@ -1747,7 +1752,7 @@ function openConvert(r, ph) {
       const aq = r.property_address ? [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ') : null
       const contact = { id, name: r.owner_name, company: r.company, priority: pri.value, contact_type: type.value, phone: goodPhone?.phone || null, email: r.email,
         address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id,
-        next_follow_up: next.value || null, next_note: nextNote.value.trim() || null, last_contact: ymd(T),
+        next_follow_up: next.value || null, next_time: nextTime.value || null, next_note: nextNote.value.trim() || null, last_contact: ymd(T),
         notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
       const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
       const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: notes.value.trim() }); if (e2) throw e2
@@ -1763,7 +1768,8 @@ function openConvert(r, ph) {
     el('p', { class: 'muted', text: 'They move into your contacts with a priority and cadence, and their building goes on the map and pipeline.' }),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Type', type)),
     el('label', { class: 'f' }, 'Notes from the call', notes),
-    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Next step', nextNote)),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
+    el('label', { class: 'f' }, 'Next step', nextNote),
     err, el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => openProspect(r.id) }, 'Cancel')))
   DRAWER.kind = null
   showDrawer(form)
@@ -2342,6 +2348,39 @@ function notesView() {
         el('div', { class: 'when' }, fmt(v.talked_on, { month: 'short', day: 'numeric' }),
           c?.next_follow_up ? el('div', { class: 'muted', style: 'font-size:12px', text: 'Next ' + fmt(c.next_follow_up, { month: 'short', day: 'numeric' }) }) : null))
     })) : el('div', { class: 'empty', text: q ? 'No notes match.' : 'No notes yet — tap “+ Add note”, or use “Add a note” on any contact card.' })))
+}
+
+
+/* Follow-up on a prospect card — for a good conversation where you want to call back on a set day (stays a prospect) */
+function prospectFollowUp(r) {
+  const has = !!(r.callback_note || r.callback_time)
+  const date = el('input', { type: 'date', value: has ? r.next_attempt_on : ymd(addBusinessDays(today(), 2)) })
+  const time = el('input', { type: 'time', value: r.callback_time ? String(r.callback_time).slice(0, 5) : '' })
+  const what = el('input', { placeholder: 'What to do — e.g. call back after he talks to his partner', value: r.callback_note || '' })
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary small', type: 'button' }, has ? 'Update follow-up' : 'Set follow-up')
+  save.onclick = async () => {
+    if (!date.value) { err.textContent = 'Pick a date.'; return }
+    save.disabled = true; err.textContent = ''
+    const patch = { next_attempt_on: date.value, callback_time: time.value || null, callback_note: what.value.trim() || 'Follow up', updated_at: nowIso() }
+    if (['New', 'Bad data'].includes(r.status)) patch.status = 'Attempted'
+    const { error } = await sb.from('prospects').update(patch).eq('id', r.id)
+    if (error) { err.textContent = error.message; save.disabled = false; return }
+    toast(`Follow-up set for ${fmt(date.value, { weekday: 'short', month: 'short', day: 'numeric' })}${time.value ? ' at ' + fmtTime(time.value) : ''}`)
+    refreshProspects(); openProspect(r.id)
+  }
+  const clear = has ? el('button', { class: 'btn small ghost', type: 'button', onclick: async e => {
+    e.currentTarget.disabled = true
+    const { error } = await sb.from('prospects').update({ callback_time: null, callback_note: null, updated_at: nowIso() }).eq('id', r.id)
+    if (error) { toast(error.message); return }
+    toast('Follow-up cleared'); refreshProspects(); openProspect(r.id)
+  } }, 'Clear') : null
+  return el('div', { class: 'box stack', style: 'margin-top:14px' },
+    el('h4', { style: 'margin:0', text: has ? '📅 Follow-up' : '📅 Good conversation? Set a follow-up' }),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Date', date), el('label', { class: 'f' }, 'Time (optional)', time)),
+    el('label', { class: 'f' }, 'Next step', what),
+    el('p', { class: 'muted', style: 'font-size:12.5px;margin:0', text: 'They stay on your prospect list and jump to the top of “To call” that day. Use “Talked ✓” instead to make them a contact.' }),
+    err, el('div', { class: 'actions' }, save, clear))
 }
 
 boot()
