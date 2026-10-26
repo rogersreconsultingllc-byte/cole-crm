@@ -1482,8 +1482,8 @@ function openBuyerForm(b = {}) {
 /* ---------- Prospects (owners not yet talked to) ---------- */
 const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
-const P_STATUS = { tocall: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
-const P_STATUS_LABEL = { tocall: 'To call', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
+const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
 const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Verified owner', ['Owner match', 'Company match']], unverified: ['Owner not confirmed', ['Different owner', 'Not checked', 'Not found']], public: ['Public/institutional', ['Public/institution']], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
@@ -1494,6 +1494,11 @@ const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{
 async function loadProspectCounts() {
   const { data, error } = await sb.rpc('prospect_county_counts')
   if (!error) P.counts = data || []
+  // How many owners have never been dialed (respects the county filter) — shown on the "Haven't called" tab
+  let nq = sb.from('prospects').select('id', { count: 'exact', head: true }).in('status', ['New', 'Attempted']).eq('attempts', 0).neq('ownership_check', 'Public/institution')
+  if (P.county) nq = P.county === 'Unknown' ? nq.is('county', null) : nq.eq('county', P.county)
+  const { count } = await nq
+  P.neverCount = count ?? null
 }
 async function loadProspects() {
   const my = ++P.reqId
@@ -1506,6 +1511,7 @@ async function loadProspects() {
   // To call = due now (never called, or retry date is today or earlier); called today and scheduled callbacks have their own tabs
   if (!byPhone && P.status === 'tocall') q = q.lte('next_attempt_on', T0)
   if (!byPhone && P.status === 'later') q = q.gt('next_attempt_on', T0)
+  if (!byPhone && P.status === 'never') q = q.eq('attempts', 0) // never dialed — rip through the list
   if (!byPhone && P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
   if (!byPhone && P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
   else if (!byPhone && P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
@@ -1519,6 +1525,7 @@ async function loadProspects() {
   } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
   if (P.status === 'tocall') q = q.order('callback_note', { ascending: true, nullsFirst: false }).order('next_attempt_on').order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
   else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
+  else if (P.status === 'never') q = q.order('own_rank').order('owner_name')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
   q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
@@ -1548,7 +1555,7 @@ function prospectsView() {
     el('div', { class: 'filters county-chips' },
       el('button', { class: 'chip' + (!P.county ? ' on' : ''), onclick: () => setPF({ county: '' }) }, `All counties${toCallAll ? ' · ' + toCallAll.toLocaleString() : ''}`),
       P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
-    el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call (due first)' : v))),
+    el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call (due first)' : k === 'never' && P.neverCount != null ? `${v} · ${P.neverCount.toLocaleString()}` : v))),
     el('div', { class: 'filters' }, search,
       el('select', { class: 'chip', title: 'Checked against county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
     !totalAll && P.loaded ? el('div', { class: 'card empty-state' },
