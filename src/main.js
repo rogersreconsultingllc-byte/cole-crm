@@ -230,7 +230,7 @@ function deniedView() {
 }
 
 /* ---------- Shell ---------- */
-const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['meetings', 'Meetings'], ['kpis', 'KPIs']]
+const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['meetings', 'Meetings'], ['notes', 'Notes'], ['kpis', 'KPIs']]
 function dueCount() { const T = ymd(today()); return S.contacts.filter(c => c.next_follow_up && c.next_follow_up <= T).length }
 
 function render({ soft } = {}) {
@@ -251,7 +251,7 @@ function render({ soft } = {}) {
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })
-  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, meetings: meetingsView, kpis: kpiView }[S.tab] || todayView
+  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, meetings: meetingsView, notes: notesView, kpis: kpiView }[S.tab] || todayView
   const active = document.activeElement
   const focused = soft && active && active.dataset && active.dataset.keep
   const caret = focused ? active.selectionStart : null
@@ -1049,16 +1049,23 @@ function contactDetail(c) {
       c.company ? [el('dt', { text: 'Company' }), el('dd', { text: c.company })] : null,
       el('dt', { text: 'Last talked' }), el('dd', { text: fmt(c.last_contact, LONG) }),
       el('dt', { text: 'About' }), el('dd', { style: 'white-space:pre-wrap', text: c.notes || '—' })),
-    el('div', { class: 'box stack' },
-      el('h4', { text: 'Log a conversation' }),
-      el('label', { class: 'f' }, 'Date you talked', talked),
-      el('label', { class: 'f' }, 'Notes', notes),
-      el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Next call', nextDate)),
-      el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next step', nextStep), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
-      logErr, el('div', { class: 'actions' }, save)),
+    (() => {
+      const convBox = el('div', { class: 'stack' + (S.logMode === 'note' ? ' hidden' : '') },
+        el('label', { class: 'f' }, 'Date you talked', talked),
+        el('label', { class: 'f' }, 'Notes', notes),
+        el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Next call', nextDate)),
+        el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next step', nextStep), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
+        logErr, el('div', { class: 'actions' }, save))
+      const noteBox = noteForm(c, { hidden: S.logMode !== 'note' })
+      const chipC = el('button', { class: 'chip' + (S.logMode !== 'note' ? ' on' : '') }, 'Log a conversation')
+      const chipN = el('button', { class: 'chip' + (S.logMode === 'note' ? ' on' : '') }, 'Add a note (didn’t talk)')
+      const pick = m => { S.logMode = m; chipC.classList.toggle('on', m !== 'note'); chipN.classList.toggle('on', m === 'note'); convBox.classList.toggle('hidden', m === 'note'); noteBox.classList.toggle('hidden', m !== 'note') }
+      chipC.onclick = () => pick('conv'); chipN.onclick = () => pick('note')
+      return el('div', { class: 'box stack' }, el('div', { class: 'filters', style: 'margin:0' }, chipC, chipN), convBox, noteBox)
+    })(),
     textSection(c, texts),
     el('h4', { text: `Conversation history (${hist.length})` }),
-    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', null, el('div', { class: 'date', text: fmt(v.talked_on, LONG) }), el('div', { class: 'txt', text: v.notes }))))
+    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', { class: isNote(v.notes) ? 'note' : null }, el('div', { class: 'date' }, fmt(v.talked_on, LONG), isNote(v.notes) ? el('span', { class: 'notetag', text: 'Note' }) : null), el('div', { class: 'txt', text: isNote(v.notes) ? noteBody(v.notes) : v.notes }))))
       : el('p', { class: 'muted', text: 'No conversations logged yet.' }),
     el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact'),
       el('button', { class: 'btn danger', style: 'margin-left:auto', onclick: e => deleteContact(c, e.currentTarget) }, 'Delete contact')))
@@ -2266,6 +2273,75 @@ function openMeetingForm({ contactId } = {}) {
     nextBox, err, el('div', { class: 'actions' }, save))
   DRAWER.kind = 'meetform'; DRAWER.id = null
   showDrawer(form)
+}
+
+
+/* ---------- Notes (general notes when you didn't talk — never counted as a call) ---------- */
+const isNote = n => /^note:/i.test(String(n || '').trim())
+const noteBody = n => String(n || '').trim().replace(/^note:\s*/i, '')
+// A note + optional new follow-up. Doesn't touch "last talked" or priority, and doesn't count toward call KPIs.
+function noteForm(c, { hidden, onDone } = {}) {
+  const who = c ? null : contactSelect('')
+  if (who) who.firstChild.textContent = '— Pick a contact —'
+  const date = el('input', { type: 'date', value: ymd(today()), oninput: markDirty })
+  const text = el('textarea', { rows: 4, placeholder: 'Anything worth remembering — drove by the building, saw a listing, sent a mailer, heard he’s traveling…', oninput: markDirty })
+  const cur = () => c || contactById(who?.value)
+  const fDate = el('input', { type: 'date', value: c?.next_follow_up || '', oninput: markDirty })
+  const fTime = el('input', { type: 'time', value: c?.next_time ? String(c.next_time).slice(0, 5) : '', oninput: markDirty })
+  const fStep = el('input', { placeholder: 'What to do that day', value: c?.next_note || '', oninput: markDirty })
+  if (who) who.onchange = () => { const x = cur(); fDate.value = x?.next_follow_up || ''; fTime.value = x?.next_time ? String(x.next_time).slice(0, 5) : ''; fStep.value = x?.next_note || '' }
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary', type: 'button' }, 'Save note')
+  save.onclick = async () => {
+    const x = cur()
+    if (!x) { err.textContent = 'Pick a contact.'; return }
+    if (!text.value.trim()) { err.textContent = 'Write the note.'; return }
+    save.disabled = true; err.textContent = ''
+    try {
+      const { error } = await sb.from('conversations').insert({ contact_id: x.id, talked_on: date.value || ymd(today()), notes: 'Note: ' + text.value.trim() })
+      if (error) throw error
+      const patch = {}
+      if ((fDate.value || null) !== (x.next_follow_up || null)) patch.next_follow_up = fDate.value || null
+      if ((fTime.value || null) !== (x.next_time ? String(x.next_time).slice(0, 5) : null)) patch.next_time = fTime.value || null
+      if (fStep.value.trim() !== (x.next_note || '')) patch.next_note = fStep.value.trim() || null
+      if (Object.keys(patch).length) { patch.updated_at = nowIso(); const { error: e2 } = await sb.from('contacts').update(patch).eq('id', x.id); if (e2) throw e2 }
+      await Promise.all([loadTable('conversations'), Object.keys(patch).length ? loadTable('contacts') : null])
+      toast('Note saved' + (patch.next_follow_up ? ` · follow-up ${fmt(patch.next_follow_up, { weekday: 'short', month: 'short', day: 'numeric' })}` : ''))
+      if (onDone) onDone(); else { render({ soft: true }); refreshDrawer(true) }
+    } catch (x2) { err.textContent = 'Couldn’t save: ' + (x2.message || x2); save.disabled = false }
+  }
+  return el('div', { class: 'stack' + (hidden ? ' hidden' : '') },
+    who ? el('label', { class: 'f' }, 'Contact', who) : null,
+    el('label', { class: 'f' }, 'Date', date),
+    el('label', { class: 'f' }, 'Note', text),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Follow-up date (change to move it)', fDate), el('label', { class: 'f' }, 'Time (blank = first call block)', fTime)),
+    el('label', { class: 'f' }, 'Next step', fStep),
+    el('p', { class: 'muted', style: 'font-size:12.5px;margin:0', text: 'Notes don’t count as a call and don’t change “last talked.”' }),
+    err, el('div', { class: 'actions' }, save))
+}
+function openNoteForm() {
+  DRAWER.kind = 'noteform'; DRAWER.id = null
+  showDrawer(el('div', { class: 'stack' }, el('h2', { text: 'Add a note' }), noteForm(null, { onDone: () => { closeDrawer(); render({ soft: true }) } })))
+}
+function notesView() {
+  const q = (S.noteQ || '').toLowerCase()
+  const all = S.convos.filter(v => isNote(v.notes)).sort((a, b) => String(b.talked_on).localeCompare(String(a.talked_on)) || b.id - a.id)
+  const rows = all.filter(v => { if (!q) return true; const c = contactById(v.contact_id); return (noteBody(v.notes) + ' ' + (c?.name || '') + ' ' + (c?.address || '')).toLowerCase().includes(q) })
+  return el('div', null,
+    el('div', { class: 'head' },
+      el('div', null, el('h1', { text: 'Notes' }), el('p', { class: 'muted', text: `${all.length} note${all.length === 1 ? '' : 's'} · general notes when you didn’t talk to them` })),
+      el('div', { class: 'actions' }, el('button', { class: 'btn primary', onclick: openNoteForm }, '+ Add note'))),
+    el('input', { class: 'search', placeholder: 'Search notes or names…', value: S.noteQ || '', 'data-keep': 'noteq', oninput: e => { S.noteQ = e.target.value; render({ soft: true }) } }),
+    el('div', { class: 'card', style: 'margin-top:10px' }, rows.length ? el('ul', { class: 'list' }, rows.map(v => {
+      const c = contactById(v.contact_id)
+      return el('li', { class: 'item', onclick: () => c && openContact(c.id) },
+        el('span', { class: 'pri ' + (c?.priority || 'C'), text: c?.priority || 'C' }),
+        el('div', { class: 'who' },
+          el('div', { class: 'name', text: c?.name || v.contact_id }),
+          el('div', { class: 'sub', style: 'white-space:normal', text: noteBody(v.notes) })),
+        el('div', { class: 'when' }, fmt(v.talked_on, { month: 'short', day: 'numeric' }),
+          c?.next_follow_up ? el('div', { class: 'muted', style: 'font-size:12px', text: 'Next ' + fmt(c.next_follow_up, { month: 'short', day: 'numeric' }) }) : null))
+    })) : el('div', { class: 'empty', text: q ? 'No notes match.' : 'No notes yet — tap “+ Add note”, or use “Add a note” on any contact card.' })))
 }
 
 boot()
