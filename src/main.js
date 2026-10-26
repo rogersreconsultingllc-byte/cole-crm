@@ -1681,6 +1681,7 @@ function prospectDetail(r) {
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
       el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit'),
+      el('button', { class: 'btn danger', onclick: e => deleteProspect(r, e.currentTarget) }, 'Delete'),
       el('button', { class: 'btn', style: 'margin-left:auto', disabled: !prevProspectId(r.id), onclick: () => goPrevProspect(r) }, '← Previous owner'),
       el('button', { class: 'btn', onclick: () => goNextProspect(r) }, 'Next owner →')),
     calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
@@ -2388,6 +2389,23 @@ function prospectFollowUp(r) {
     el('label', { class: 'f' }, 'Next step', what),
     el('p', { class: 'muted', style: 'font-size:12.5px;margin:0', text: 'They stay on your prospect list and jump to the top of “To call” that day. Use “Talked ✓” instead to make them a contact.' }),
     err, el('div', { class: 'actions' }, save, clear))
+}
+
+
+/* Delete a prospect (and its numbers). Past dials stay in the call log so KPIs don't change. */
+async function deleteProspect(r, btn) {
+  const n = (r.prospect_phones || []).length
+  if (!confirm(`Delete ${r.owner_name}${r.property_address ? ' (' + r.property_address + ')' : ''} from your prospect list?\n\nThis removes the card and its ${n} number${n === 1 ? '' : 's'}. Calls you already made still count in your KPIs. This can't be undone.`)) return
+  btn.disabled = true
+  // Find who comes next before the list refreshes
+  const i = P.rows.findIndex(x => x.id === r.id)
+  const next = P.rows.slice(i + 1).find(x => x.id !== r.id) || P.rows.slice(0, Math.max(0, i)).reverse().find(x => x.id !== r.id)
+  const { error } = await sb.from('prospects').delete().eq('id', r.id)
+  if (error) { toast('Couldn’t delete: ' + error.message); btn.disabled = false; return }
+  const h = PHIST.lastIndexOf(r.id); if (h >= 0) PHIST.splice(h, 1)
+  await refreshProspects()
+  if (next) { toast(`${r.owner_name} deleted · Next: ${next.owner_name}`); openProspect(next.id) }
+  else { toast(`${r.owner_name} deleted`); closeDrawer() }
 }
 
 boot()
