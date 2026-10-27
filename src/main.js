@@ -1538,7 +1538,16 @@ async function loadProspects() {
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim().toLowerCase()
   const T0 = ymd(today())
   if (pd) q = q.gt('n_people', 0).like('digits', `%${pd}%`) // a phone search looks across every building, ignoring tabs and filters
-  else {
+  else if (term) {
+    // A name/address search looks across every building (all tabs, all counties), including people hidden in the cleanup
+    const words = term.split(/\s+/).filter(Boolean)
+    let sq = sb.from('prospect_building_search').select('id')
+    for (const w of words) sq = sq.ilike('all_text', `%${w}%`)
+    const { data: hits } = await sq.limit(500)
+    if (my !== P.reqId) return
+    const ids = (hits || []).map(h => h.id)
+    q = q.in('id', ids.length ? ids : [-1])
+  } else {
     q = applyBuildingFilters(q)
     if (P.status === 'tocall') q = q.gt('callable', 0).lte('next_due', T0)
     else if (P.status === 'never') q = q.gt('callable', 0).eq('attempts', 0)
@@ -1550,7 +1559,6 @@ async function loadProspects() {
     else if (P.status === 'dnc') q = q.eq('any_dnc', true)
     else if (P.status === 'converted') q = q.eq('any_converted', true)
     else if (P.status === 'bad') q = q.eq('callable', 0).eq('all_bad', true)
-    if (term) q = q.ilike('search_text', `%${term}%`)
   }
   if (P.status === 'tocall') q = q.order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
   else if (P.status === 'later' || P.status === 'ownervm') q = q.order('next_due').order('address')
@@ -1588,8 +1596,11 @@ function prospectsView() {
     el('div', { class: 'filters' }, search,
       el('select', { class: 'chip', title: 'Checked against the LLC (Sunbiz) and county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
     (() => {
-      const d = phoneQuery(P.q.trim()); if (!d) return null
-      const cs = S.contacts.filter(c => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d))
+      const d = phoneQuery(P.q.trim())
+      const t = d ? null : P.q.trim().toLowerCase()
+      if (!d && (!t || t.length < 3)) return null
+      const cs = d ? S.contacts.filter(c => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d))
+        : S.contacts.filter(c => t.split(/\s+/).every(w => [c.name, c.company].join(' ').toLowerCase().includes(w)))
       return cs.length ? [el('div', { class: 'section-title', text: `In your contacts (${cs.length})` }), el('div', { class: 'card', style: 'margin-bottom:10px' }, el('ul', { class: 'list' }, cs.map(c => contactRow(c))))] : null
     })(),
     !totalAll && P.loaded ? el('div', { class: 'card empty-state' },
@@ -1613,6 +1624,7 @@ function prospectsView() {
               b.attempts ? el('span', { class: 'tag', text: `${b.attempts} attempt${b.attempts > 1 ? 's' : ''}` }) : null,
               b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
               : due && b.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
+            P.q.trim() && !phoneQuery(P.q.trim()) ? (() => { const ws = P.q.trim().toLowerCase().split(/\s+/); const hit = String(b.names || '').split(' · ').find(n => ws.every(w => n.toLowerCase().includes(w))); return hit ? el('div', { class: 'sub', style: 'font-weight:600', text: '👤 ' + hit }) : !String(b.search_text || '').includes(ws[0]) || !ws.every(w => String(b.search_text || '').includes(w)) ? el('div', { class: 'sub', text: '👤 match is someone hidden in the cleanup — open the card → Show removed' }) : null })() : null,
             el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })))
       })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No buildings match.' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
