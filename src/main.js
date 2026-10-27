@@ -1496,7 +1496,7 @@ function openBuyerForm(b = {}) {
 const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
 const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
-const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', ownervm: 'Good # (left VM)', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
 const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Owner verified', null], unverified: ['Owner not verified yet', null], public: ['Public/institutional', null], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
@@ -1504,7 +1504,7 @@ const ownTag = r => { const t = OWN_TAG[r.ownership_check]; return t ? el('span'
 // How each person on a building checks out against the LLC (Sunbiz) and county records
 const VERIFY_TAG = { 'LLC manager': ['✓ on the LLC', 'own-ok', 'Listed as a manager/officer of the owning entity on Sunbiz'], 'County owner': ['✓ county owner', 'own-ok', 'Named as owner in county property records'], 'Unverified': ['not verified', 'own-q', 'Not yet matched to the LLC or county records'], 'Not on LLC/county': ['not on LLC or county', 'own-x', 'Not on the LLC or in county records'] }
 const verifyTag = v => { const t = VERIFY_TAG[v || 'Unverified']; return t ? el('span', { class: 'otag ' + t[1], title: t[2], text: t[0] }) : null }
-const phoneRank = s => ({ Good: 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
+const phoneRank = s => ({ Good: 0, 'Owner VM': 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
 const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v).trim() }
 const bTitle = b => b.property_name || b.address || 'Unknown address'
 const bStatus = b => b.any_converted ? 'Converted' : b.callable > 0 ? (b.attempts ? 'Attempted' : 'New') : b.any_reached ? 'Reached' : b.any_ni ? 'Not interested' : b.any_dnc ? 'Do not call' : 'Bad data'
@@ -1542,6 +1542,7 @@ async function loadProspects() {
     q = applyBuildingFilters(q)
     if (P.status === 'tocall') q = q.gt('callable', 0).lte('next_due', T0)
     else if (P.status === 'never') q = q.gt('callable', 0).eq('attempts', 0)
+    else if (P.status === 'ownervm') q = q.eq('has_owner_vm', true)
     else if (P.status === 'later') q = q.gt('callable', 0).gt('next_due', T0)
     else if (P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
     else if (P.status === 'reached') q = q.eq('any_reached', true)
@@ -1552,7 +1553,7 @@ async function loadProspects() {
     if (term) q = q.ilike('search_text', `%${term}%`)
   }
   if (P.status === 'tocall') q = q.order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
-  else if (P.status === 'later') q = q.order('next_due').order('address')
+  else if (P.status === 'later' || P.status === 'ownervm') q = q.order('next_due').order('address')
   else if (P.status === 'never') q = q.order('best_rank').order('address')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
@@ -1607,6 +1608,7 @@ function prospectsView() {
             el('div', { class: 'name' }, bTitle(b), b.city ? el('span', { class: 'muted', style: 'font-weight:400', text: b.city }) : null,
               b.n_people > 1 ? el('span', { class: 'tag', text: `${b.n_people} owners` }) : null,
               b.has_verified ? el('span', { class: 'otag own-ok', text: '✓ verified' }) : null,
+              b.has_owner_vm ? el('span', { class: 'otag own-ok', title: 'You left a voicemail and confirmed this is the owner’s number', text: '✓ owner VM' }) : null,
               b.any_converted ? el('span', { class: 'tag', text: 'contact' }) : null,
               b.attempts ? el('span', { class: 'tag', text: `${b.attempts} attempt${b.attempts > 1 ? 's' : ''}` }) : null,
               b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
@@ -1717,6 +1719,7 @@ function personBlock(r, b, notes) {
       lastNote ? el('div', { class: 'pp-note', text: `📝 ${fmt(String(lastNote.called_at).slice(0, 10))}: ${lastNote.notes}` }) : null,
       r.status === 'Converted' ? null : el('div', { class: 'pp-acts' },
         act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
+        el('button', { class: 'btn small vmok' + (ph.status === 'Owner VM' ? ' on' : ''), title: 'Left a voicemail and the greeting confirmed it’s the owner — parks this as a good number', onclick: e => { e.target.disabled = true; recordAttempt(r, ph, 'Left voicemail — owner’s number confirmed', 'Owner VM', notes.value.trim()) } }, 'VM ✓ owner’s #'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
         el('button', { class: 'btn small', title: 'Someone answered (office line, receptionist, partner…) but not a lead — log it with a note', onclick: e => {
@@ -1724,7 +1727,7 @@ function personBlock(r, b, notes) {
           if (n === null) return
           e.target.disabled = true; recordAttempt(r, ph, 'Spoke — office line', 'Good', n.trim())
         } }, 'Spoke (note)'),
-        ph.status !== 'Untested' && ph.status !== 'Good' ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
+        !['Untested', 'Good', 'Owner VM'].includes(ph.status) ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
   }
@@ -1774,7 +1777,7 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const phones = (r.prospect_phones || []).map(x => x.id === ph.id ? { ...x, status: phoneStatus, last_called_at: now } : x)
   const liveLeft = phones.filter(x => !PHONE_BAD.includes(x.status))
   const attempts = (r.attempts || 0) + 1
-  let status = 'Attempted', next = ymd(addBusinessDays(T, outcome === 'Left voicemail' ? 2 : 1))
+  let status = 'Attempted', next = ymd(addBusinessDays(T, /^Left voicemail/.test(outcome) ? 2 : 1))
   if (!liveLeft.length) { status = phones.every(x => x.status === 'Do not call') ? 'Do not call' : 'Bad data'; next = null }
   else if (attempts >= 6) next = ymd(addBusinessDays(T, 20)) // after 6 tries, cool off ~a month
   const res = await Promise.all([
