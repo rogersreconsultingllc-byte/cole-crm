@@ -1570,7 +1570,7 @@ function prospectsView() {
         const best = live[0]
         const due = r.next_attempt_on && r.next_attempt_on <= T
         return el('li', { class: 'item', onclick: () => openProspect(r.id) },
-          el('span', { class: 'pstat ' + slug(r.status), title: r.status }),
+          r.priority ? el('span', { class: 'pri ' + r.priority, text: r.priority }) : el('span', { class: 'pstat ' + slug(r.status), title: r.status }),
           el('div', { class: 'who' },
             el('div', { class: 'name' }, r.owner_name, r.company && r.company !== r.owner_name ? el('span', { class: 'muted', style: 'font-weight:400', text: r.company }) : null,
               ownTag(r),
@@ -1637,11 +1637,20 @@ function prospectDetail(r) {
           e.target.disabled = true; recordAttempt(r, ph, 'Spoke — office line', 'Good', n.trim())
         } }, 'Spoke (note)'),
         ph.status !== 'Untested' && ph.status !== 'Good' ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
-        el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓')))
+        el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
+        el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
   }
   return el('div', null,
-    el('div', { class: 'dhead' }, el('h2', { text: r.owner_name })),
+    el('div', { class: 'dhead' }, r.priority ? el('span', { class: 'pri ' + r.priority, text: r.priority }) : null, el('h2', { text: r.owner_name })),
     el('div', { class: 'actions', style: 'margin-top:6px' },
+      el('span', { class: 'muted', style: 'font-size:13px', text: 'Tag:' }),
+      ['A', 'B', 'C'].map(p => el('button', { class: 'chip pri-chip' + (r.priority === p ? ' on' : ''), title: r.priority === p ? 'Remove tag' : `Tag as ${p}`, onclick: async e => {
+        e.currentTarget.disabled = true
+        const v = r.priority === p ? null : p
+        const { error } = await sb.from('prospects').update({ priority: v, updated_at: nowIso() }).eq('id', r.id)
+        if (error) { toast(error.message); return }
+        toast(v ? `${r.owner_name} tagged ${v}` : 'Tag removed'); refreshProspects(); openProspect(r.id)
+      } }, p)),
       el('span', { class: 'ptag ' + slug(r.status), text: r.status }),
       r.county ? el('span', { class: 'muted', text: r.county + ' County' }) : null,
       r.next_attempt_on && !(r.callback_note || r.callback_time) ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
@@ -1677,6 +1686,7 @@ function prospectDetail(r) {
       } }, 'Add number')),
     prospectFollowUp(r),
     el('div', { class: 'actions', style: 'margin-top:16px' },
+      el('button', { class: 'btn primary', onclick: () => openConvert(r, null, { meeting: true }) }, '📅 Meeting set'),
       el('button', { class: 'btn', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
       el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
@@ -1736,20 +1746,28 @@ async function setProspectStatus(r, status, outcome) {
 }
 
 /* Talked → becomes a real contact */
-function openConvert(r, ph) {
+function openConvert(r, ph, { meeting } = {}) {
   const T = today()
-  const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === 'B' })))
+  const defPri = r.priority || (meeting ? 'A' : 'B')
+  const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === defPri })))
+  const mDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
+  const mTime = el('input', { type: 'time', value: '10:00' })
+  const mWhere = el('input', { placeholder: 'At the property, their office, Zoom…', value: meeting && r.property_address ? 'At the property — ' + r.property_address : '' })
+  const meetWhen = () => `${fmt(mDate.value, { weekday: 'short', month: 'short', day: 'numeric' })}${mTime.value ? ' at ' + fmtTime(mTime.value) : ''}${mWhere.value.trim() ? ' — ' + mWhere.value.trim() : ''}`
   const type = el('select', null, TYPES.map(t => el('option', { value: t, text: t, selected: t === 'Seller' })))
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?' })
   const hasFu = !!(r.callback_note || r.callback_time) && r.next_attempt_on >= ymd(T)
-  const next = el('input', { type: 'date', value: hasFu ? r.next_attempt_on : ymd(addCadence(T, 'B')) })
+  const next = el('input', { type: 'date', value: hasFu ? r.next_attempt_on : ymd(addCadence(T, defPri)) })
   pri.onchange = () => { next.value = ymd(addCadence(T, pri.value)) }
   const nextTime = el('input', { type: 'time', value: hasFu && r.callback_time ? String(r.callback_time).slice(0, 5) : '' })
   const nextNote = el('input', { placeholder: 'Next step', value: hasFu ? r.callback_note || '' : '' })
   const err = el('div', { class: 'err' })
-  const save = el('button', { class: 'btn primary', type: 'submit' }, 'Save as contact')
+  const save = el('button', { class: 'btn primary', type: 'submit' }, meeting ? 'Save meeting' : 'Save as contact')
   const form = el('form', { class: 'stack', onsubmit: async e => {
-    e.preventDefault(); if (!notes.value.trim()) { err.textContent = 'Add a note about the conversation.'; return }
+    e.preventDefault()
+    if (meeting && !mDate.value) { err.textContent = 'Pick the meeting date.'; return }
+    if (!meeting && !notes.value.trim()) { err.textContent = 'Add a note about the conversation.'; return }
+    const convNote = meeting ? 'Meeting set for ' + meetWhen() + (notes.value.trim() ? ' — ' + notes.value.trim() : '') : notes.value.trim()
     save.disabled = true
     try {
       const base = slug(r.owner_name)
@@ -1760,24 +1778,26 @@ function openConvert(r, ph) {
       const aq = r.property_address ? [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ') : null
       const contact = { id, name: r.owner_name, company: r.company, priority: pri.value, contact_type: type.value, phone: goodPhone?.phone || null, email: r.email,
         address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id,
-        next_follow_up: next.value || null, next_time: nextTime.value || null, next_note: nextNote.value.trim() || null, last_contact: ymd(T),
+        next_follow_up: meeting ? mDate.value : next.value || null, next_time: meeting ? mTime.value || null : nextTime.value || null,
+        next_note: meeting ? 'MEETING ' + meetWhen() : nextNote.value.trim() || null, last_contact: ymd(T),
         notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
       const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
-      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: notes.value.trim() }); if (e2) throw e2
-      if (r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: 'Contacted' })
+      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: convNote }); if (e2) throw e2
+      if (r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso() })
       if (ph) await sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: nowIso() }).eq('id', ph.id)
-      await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: `Talked → contact (${pri.value})`, notes: notes.value.trim() })
+      await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: meeting ? `Reached — meeting set → contact (${pri.value})${ph ? ' (' + ph.phone + ')' : ''}` : `Talked → contact (${pri.value})`, notes: convNote })
       await sb.from('prospects').update({ status: 'Converted', converted_contact_id: id, next_attempt_on: null, last_attempt_at: nowIso(), attempts: (r.attempts || 0) + 1, updated_at: nowIso() }).eq('id', r.id)
       await Promise.all([loadTable('contacts'), loadTable('conversations'), loadTable('properties')])
-      refreshProspects(); openContact(id); locateMissing(); toast(`${r.owner_name} added to your contacts (${pri.value})`)
+      refreshProspects(); openContact(id); locateMissing(); toast(meeting ? `Meeting set with ${r.owner_name} · ${meetWhen()}` : `${r.owner_name} added to your contacts (${pri.value})`)
     } catch (x) { err.textContent = x.message || String(x); save.disabled = false }
   } },
-    el('h2', { text: 'Talked to ' + r.owner_name }),
-    el('p', { class: 'muted', text: 'They move into your contacts with a priority and cadence, and their building goes on the map and pipeline.' }),
+    el('h2', { text: (meeting ? '📅 Meeting set with ' : 'Talked to ') + r.owner_name }),
+    el('p', { class: 'muted', text: meeting ? 'They become a contact, the meeting goes on your calendar and counts in your KPIs, and their building moves to the Meeting stage.' : 'They move into your contacts with a priority and cadence, and their building goes on the map and pipeline.' }),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Type', type)),
-    el('label', { class: 'f' }, 'Notes from the call', notes),
-    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
-    el('label', { class: 'f' }, 'Next step', nextNote),
+    meeting ? [el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Meeting date', mDate), el('label', { class: 'f' }, 'Time', mTime)), el('label', { class: 'f' }, 'Where', mWhere)] : null,
+    el('label', { class: 'f' }, meeting ? 'Notes from the call (optional)' : 'Notes from the call', notes),
+    meeting ? null : [el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
+      el('label', { class: 'f' }, 'Next step', nextNote)],
     err, el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => openProspect(r.id) }, 'Cancel')))
   DRAWER.kind = null
   showDrawer(form)
