@@ -369,3 +369,6 @@ tr.click:hover td { background: color-mix(in srgb, var(--bg) 60%, transparent); 
 input.search[data-keep="noteq"] { width: 100%; box-sizing: border-box; }
 .tag.fu { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .chip.pri-chip { padding: 3px 10px; font-weight: 700; }
+.ptag.owner-vm { background: rgba(63,178,127,.18); color: #2e9c6a; font-weight: 600; }
+.btn.small.vmok { border-color: rgba(63,178,127,.55); }
+.btn.small.vmok.on { background: rgba(63,178,127,.18); }

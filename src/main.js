@@ -1483,13 +1483,13 @@ function openBuyerForm(b = {}) {
 /* ---------- Prospects (owners not yet talked to) ---------- */
 const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
-const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
-const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], ownervm: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
+const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', ownervm: 'Good # (left VM)', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
 const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Verified owner', ['Owner match', 'Company match']], unverified: ['Owner not confirmed', ['Different owner', 'Not checked', 'Not found']], public: ['Public/institutional', ['Public/institution']], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
 const ownTag = r => { const t = OWN_TAG[r.ownership_check]; return t ? el('span', { class: 'otag ' + t[1], title: t[2], text: t[0] }) : null }
-const phoneRank = s => ({ Good: 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
+const phoneRank = s => ({ Good: 0, 'Owner VM': 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
 const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v).trim() }
 
 async function loadProspectCounts() {
@@ -1518,6 +1518,12 @@ async function loadProspects() {
   else if (!byPhone && P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
   const pd = phoneQuery(P.q.trim())
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
+  if (!byPhone && P.status === 'ownervm') { // owners whose number you confirmed from their voicemail greeting
+    const { data: vm } = await sb.from('prospect_phones').select('prospect_id').eq('status', 'Owner VM').limit(1000)
+    if (my !== P.reqId) return
+    const vids = [...new Set((vm || []).map(h => h.prospect_id))]
+    q = q.in('id', vids.length ? vids : [-1])
+  }
   if (pd) {
     const { data: hits } = await sb.from('prospect_phones').select('prospect_id').like('digits', `%${pd}%`).limit(1000)
     if (my !== P.reqId) return
@@ -1525,7 +1531,7 @@ async function loadProspects() {
     q = q.in('id', ids.length ? ids : [-1])
   } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
   if (P.status === 'tocall') q = q.order('callback_note', { ascending: true, nullsFirst: false }).order('next_attempt_on').order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
-  else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
+  else if (P.status === 'later' || P.status === 'ownervm') q = q.order('next_attempt_on').order('owner_name')
   else if (P.status === 'never') q = q.order('own_rank').order('owner_name')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
@@ -1580,6 +1586,7 @@ function prospectsView() {
           el('div', { class: 'who' },
             el('div', { class: 'name' }, r.owner_name, r.company && r.company !== r.owner_name ? el('span', { class: 'muted', style: 'font-weight:400', text: r.company }) : null,
               ownTag(r),
+              (r.prospect_phones || []).some(x => x.status === 'Owner VM') ? el('span', { class: 'otag own-ok', title: 'You confirmed this is the owner’s number from their voicemail', text: '✓ owner VM' }) : null,
               r.other_properties?.length ? el('span', { class: 'tag', text: `+${r.other_properties.length} bldg` }) : null,
               r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
               r.callback_note || r.callback_time ? el('span', { class: due ? 'late' : 'tag fu', text: `📅 ${due ? 'follow-up due' : 'follow-up ' + fmt(r.next_attempt_on, { weekday: 'short', month: 'short', day: 'numeric' })}${r.callback_time ? ' · ' + fmtTime(r.callback_time) : ''}` })
@@ -1635,6 +1642,7 @@ function prospectDetail(r) {
       lastNote ? el('div', { class: 'pp-note', text: `📝 ${fmt(String(lastNote.called_at).slice(0, 10))}: ${lastNote.notes}` }) : null,
       el('div', { class: 'pp-acts' },
         act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
+        el('button', { class: 'btn small vmok' + (ph.status === 'Owner VM' ? ' on' : ''), title: 'Left a voicemail and the greeting confirmed it’s the owner — parks this as a good number', onclick: e => { e.target.disabled = true; recordAttempt(r, ph, 'Left voicemail — owner’s number confirmed', 'Owner VM', notes.value.trim()) } }, 'VM ✓ owner’s #'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
         el('button', { class: 'btn small', title: 'Someone answered (office line, receptionist, partner…) but not a lead — log it with a note', onclick: e => {
@@ -1642,7 +1650,7 @@ function prospectDetail(r) {
           if (n === null) return
           e.target.disabled = true; recordAttempt(r, ph, 'Spoke — office line', 'Good', n.trim())
         } }, 'Spoke (note)'),
-        ph.status !== 'Untested' && ph.status !== 'Good' ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
+        !['Untested', 'Good', 'Owner VM'].includes(ph.status) ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
   }
@@ -1709,7 +1717,7 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const phones = (r.prospect_phones || []).map(x => x.id === ph.id ? { ...x, status: phoneStatus, last_called_at: now } : x)
   const liveLeft = phones.filter(x => !PHONE_BAD.includes(x.status))
   const attempts = (r.attempts || 0) + 1
-  let status = 'Attempted', next = ymd(addBusinessDays(T, outcome === 'Left voicemail' ? 2 : 1))
+  let status = 'Attempted', next = ymd(addBusinessDays(T, /^Left voicemail/.test(outcome) ? 2 : 1))
   if (!liveLeft.length) { status = phones.every(x => x.status === 'Do not call') ? 'Do not call' : 'Bad data'; next = null }
   else if (attempts >= 6) next = ymd(addBusinessDays(T, 20)) // after 6 tries, cool off ~a month
   const res = await Promise.all([
