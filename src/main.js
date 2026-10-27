@@ -959,15 +959,15 @@ function refreshDrawer(fresh) {
 const markDirty = e => { e.target.dataset.dirty = '1' }
 
 /* ---------- Logging calls ---------- */
-async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting }) {
-  const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note })
+async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting, propertyId }) {
+  const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note, property_id: propertyId || null })
   if (e1) throw e1
   const patch = { priority, next_follow_up: next || null, next_time: nextTime || null, next_note: nextNote || null, updated_at: nowIso() }
   if (!c.last_contact || c.last_contact <= talked) patch.last_contact = talked
   const { error: e2 } = await sb.from('contacts').update(patch).eq('id', c.id)
   if (e2) throw e2
   // Move this owner's properties along the pipeline
-  const bump = propsFor(c.id).filter(p => p.stage === 'Prospect' || (meeting && p.stage === 'Contacted'))
+  const bump = propsFor(c.id).filter(p => (propertyId && meeting ? String(p.id) === String(propertyId) && ['Prospect', 'Contacted'].includes(p.stage) : p.stage === 'Prospect' || (meeting && p.stage === 'Contacted')))
   for (const p of bump) await sb.from('properties').update({ stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso(), updated_at: nowIso() }).eq('id', p.id)
   await Promise.all([loadTable('conversations'), loadTable('contacts'), bump.length ? loadTable('properties') : null])
 }
@@ -980,7 +980,7 @@ function outcomeBar(c, notesField) {
     btn.disabled = true
     try {
       const note = extra() ? `${label} — ${extra()}` : label
-      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting })
+      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting, propertyId: opts.propertyId })
       toast(`${label} logged · next call ${fmt(ymd(opts.next), { weekday: 'short', month: 'short', day: 'numeric' })}`)
       render({ soft: true }); refreshDrawer(true)
     } catch (x) { toast('Couldn’t save: ' + (x.message || x)); btn.disabled = false }
@@ -995,14 +995,25 @@ function outcomeBar(c, notesField) {
   const mDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
   const mTime = el('input', { type: 'time', value: '10:00' })
   const mWhere = el('input', { placeholder: 'Where (at the property, Zoom…)' })
+  const mAbout = propertyPicker(c.id)
   meetBox.append(el('div', { class: 'row3' }, el('label', { class: 'f' }, 'Date', mDate), el('label', { class: 'f' }, 'Time', mTime), el('label', { class: 'f' }, 'Where', mWhere)),
+    propsFor(c.id).length ? el('label', { class: 'f' }, 'Meeting is about', mAbout) : null,
     el('button', { class: 'btn primary small', onclick: e => {
       const t = mTime.value ? new Date('1970-01-01T' + mTime.value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
       const when = `${fmt(mDate.value, { weekday: 'short', month: 'short', day: 'numeric' })}${t ? ' at ' + t : ''}${mWhere.value.trim() ? ' — ' + mWhere.value.trim() : ''}`
-      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextTime: mTime.value || null, nextNote: 'MEETING ' + when, meeting: true })
+      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextTime: mTime.value || null, nextNote: 'MEETING ' + when, meeting: true, propertyId: mAbout.value || null })
     } }, 'Save meeting'))
   return el('div', null, bar, meetBox)
 }
+
+// Which building a meeting is about (shown when the contact has any properties)
+function propertyPicker(cid, selected) {
+  const props = propsFor(cid).filter(p => p.stage !== 'Dead')
+  const sel = el('select', null, el('option', { value: '', text: props.length ? '— Not about a specific building —' : '— No buildings on this contact —' }),
+    props.map((p, i) => el('option', { value: p.id, text: [p.name, p.address, p.city].filter(Boolean).join(', '), selected: selected ? String(selected) === String(p.id) : i === 0 })))
+  return sel
+}
+const propLabel = id => { const p = propById(Number(id)) || S.props.find(x => String(x.id) === String(id)); return p ? [p.name, p.address].filter(Boolean).join(' — ') : null }
 
 /* ---------- Contact drawer ---------- */
 function contactDetail(c) {
@@ -1041,6 +1052,7 @@ function contactDetail(c) {
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
     el('button', { class: 'btn small', style: 'margin-top:8px', onclick: () => openPropertyForm({ contact_id: c.id, city: c.city, stage: 'Contacted' }) }, '+ Add a property'),
+    coOwnersSection(c),
     S.buyers.filter(b => b.contact_id === c.id).map(buyerPropsSection),
     (() => { const mp = props.find(x => x.lat != null && x.stage !== 'Dead'); return mp ? nearbySection(mp) : null })(),
     docsSection(c, 'contacts'),
@@ -1066,7 +1078,7 @@ function contactDetail(c) {
     })(),
     textSection(c, texts),
     el('h4', { text: `Conversation history (${hist.length})` }),
-    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', { class: isNote(v.notes) ? 'note' : null }, el('div', { class: 'date' }, fmt(v.talked_on, LONG), isNote(v.notes) ? el('span', { class: 'notetag', text: 'Note' }) : null), el('div', { class: 'txt', text: isNote(v.notes) ? noteBody(v.notes) : v.notes }))))
+    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', { class: isNote(v.notes) ? 'note' : null }, el('div', { class: 'date' }, fmt(v.talked_on, LONG), isNote(v.notes) ? el('span', { class: 'notetag', text: 'Note' }) : null, v.property_id && propLabel(v.property_id) ? el('span', { class: 'notetag', text: '🏢 ' + propLabel(v.property_id) }) : null), el('div', { class: 'txt', text: isNote(v.notes) ? noteBody(v.notes) : v.notes }))))
       : el('p', { class: 'muted', text: 'No conversations logged yet.' }),
     el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact'),
       el('button', { class: 'btn danger', style: 'margin-left:auto', onclick: e => deleteContact(c, e.currentTarget) }, 'Delete contact')))
@@ -1486,17 +1498,34 @@ const P_PAGE = 50
 const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
 const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
-const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Verified owner', ['Owner match', 'Company match']], unverified: ['Owner not confirmed', ['Different owner', 'Not checked', 'Not found']], public: ['Public/institutional', ['Public/institution']], all: ['Everyone', null] }
+const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Owner verified', null], unverified: ['Owner not verified yet', null], public: ['Public/institutional', null], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
 const ownTag = r => { const t = OWN_TAG[r.ownership_check]; return t ? el('span', { class: 'otag ' + t[1], title: t[2], text: t[0] }) : null }
+// How each person on a building checks out against the LLC (Sunbiz) and county records
+const VERIFY_TAG = { 'LLC manager': ['✓ on the LLC', 'own-ok', 'Listed as a manager/officer of the owning entity on Sunbiz'], 'County owner': ['✓ county owner', 'own-ok', 'Named as owner in county property records'], 'Unverified': ['not verified', 'own-q', 'Not yet matched to the LLC or county records'], 'Not on LLC/county': ['not on LLC or county', 'own-x', 'Not on the LLC or in county records'] }
+const verifyTag = v => { const t = VERIFY_TAG[v || 'Unverified']; return t ? el('span', { class: 'otag ' + t[1], title: t[2], text: t[0] }) : null }
 const phoneRank = s => ({ Good: 0, Untested: 1, 'No answer': 2, Voicemail: 2, 'Wrong number': 8, Disconnected: 8, 'Do not call': 9 }[s] ?? 5)
 const fmtPhone = v => { const d = String(v).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v).trim() }
+const bTitle = b => b.property_name || b.address || 'Unknown address'
+const bStatus = b => b.any_converted ? 'Converted' : b.callable > 0 ? (b.attempts ? 'Attempted' : 'New') : b.any_reached ? 'Reached' : b.any_ni ? 'Not interested' : b.any_dnc ? 'Do not call' : 'Bad data'
+// Same key the database uses to group people into buildings
+const bkeyOf = (addr, city) => String(addr || '').replace(/[.,#]/g, '').replace(/\s+/g, ' ').trim().toUpperCase() + '|' + String(city || '').trim().toUpperCase()
 
+/* The prospect list is one card per BUILDING; every owner/manager hangs off it with their own numbers */
+function applyBuildingFilters(q) {
+  if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
+  q = q.gt('n_people', 0)
+  if (P.own === 'nopublic') q = q.neq('best_rank', 4)
+  else if (P.own === 'verified') q = q.eq('has_verified', true)
+  else if (P.own === 'unverified') q = q.or('has_verified.is.null,has_verified.eq.false')
+  else if (P.own === 'public') q = q.eq('best_rank', 4)
+  return q
+}
 async function loadProspectCounts() {
-  const { data, error } = await sb.rpc('prospect_county_counts')
+  const { data, error } = await sb.rpc('prospect_building_county_counts')
   if (!error) P.counts = data || []
-  // How many owners have never been dialed (respects the county filter) — shown on the "Haven't called" tab
-  let nq = sb.from('prospects').select('id', { count: 'exact', head: true }).in('status', ['New', 'Attempted']).eq('attempts', 0).or('ownership_check.is.null,ownership_check.neq.Public/institution')
+  // Buildings where nobody has been dialed yet — shown on the "Haven't called" tab
+  let nq = sb.from('prospect_building_list').select('id', { count: 'exact', head: true }).gt('callable', 0).eq('attempts', 0).neq('best_rank', 4)
   if (P.county) nq = P.county === 'Unknown' ? nq.is('county', null) : nq.eq('county', P.county)
   const { count } = await nq
   P.neverCount = count ?? null
@@ -1504,29 +1533,27 @@ async function loadProspectCounts() {
 async function loadProspects() {
   const my = ++P.reqId
   P.loading = true
-  let q = sb.from('prospects').select('*, prospect_phones(*)', { count: 'exact' })
-  const byPhone = !!phoneQuery(P.q.trim()) // a phone search looks across every prospect, ignoring tabs and filters
-  if (byPhone) { /* filters skipped below */ } else if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
-  if (!byPhone && P_STATUS[P.status]) q = q.in('status', P_STATUS[P.status])
-  const T0 = ymd(today())
-  // To call = due now (never called, or retry date is today or earlier); called today and scheduled callbacks have their own tabs
-  if (!byPhone && P.status === 'tocall') q = q.lte('next_attempt_on', T0)
-  if (!byPhone && P.status === 'later') q = q.gt('next_attempt_on', T0)
-  if (!byPhone && P.status === 'never') q = q.eq('attempts', 0) // never dialed — rip through the list
-  if (!byPhone && P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
-  if (!byPhone && P.own === 'nopublic') q = q.neq('ownership_check', 'Public/institution')
-  else if (!byPhone && P_OWN[P.own]?.[1]) q = q.in('ownership_check', P_OWN[P.own][1])
+  let q = sb.from('prospect_building_list').select('*', { count: 'exact' })
   const pd = phoneQuery(P.q.trim())
-  const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
-  if (pd) {
-    const { data: hits } = await sb.from('prospect_phones').select('prospect_id').like('digits', `%${pd}%`).limit(1000)
-    if (my !== P.reqId) return
-    const ids = [...new Set((hits || []).map(h => h.prospect_id))]
-    q = q.in('id', ids.length ? ids : [-1])
-  } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
-  if (P.status === 'tocall') q = q.order('callback_note', { ascending: true, nullsFirst: false }).order('next_attempt_on').order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
-  else if (P.status === 'later') q = q.order('next_attempt_on').order('owner_name')
-  else if (P.status === 'never') q = q.order('own_rank').order('owner_name')
+  const term = P.q.trim().replace(/[%,()*]/g, ' ').trim().toLowerCase()
+  const T0 = ymd(today())
+  if (pd) q = q.gt('n_people', 0).like('digits', `%${pd}%`) // a phone search looks across every building, ignoring tabs and filters
+  else {
+    q = applyBuildingFilters(q)
+    if (P.status === 'tocall') q = q.gt('callable', 0).lte('next_due', T0)
+    else if (P.status === 'never') q = q.gt('callable', 0).eq('attempts', 0)
+    else if (P.status === 'later') q = q.gt('callable', 0).gt('next_due', T0)
+    else if (P.status === 'today') { const m = new Date(); m.setHours(0, 0, 0, 0); q = q.gte('last_attempt_at', m.toISOString()) }
+    else if (P.status === 'reached') q = q.eq('any_reached', true)
+    else if (P.status === 'ni') q = q.eq('any_ni', true)
+    else if (P.status === 'dnc') q = q.eq('any_dnc', true)
+    else if (P.status === 'converted') q = q.eq('any_converted', true)
+    else if (P.status === 'bad') q = q.eq('callable', 0).eq('all_bad', true)
+    if (term) q = q.ilike('search_text', `%${term}%`)
+  }
+  if (P.status === 'tocall') q = q.order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
+  else if (P.status === 'later') q = q.order('next_due').order('address')
+  else if (P.status === 'never') q = q.order('best_rank').order('address')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
   q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
@@ -1543,12 +1570,12 @@ function prospectsView() {
   const totalAll = P.counts.reduce((s, c) => s + Number(c.total), 0)
   const toCallAll = P.counts.reduce((s, c) => s + Number(c.to_call), 0)
   const T = ymd(today())
-  const search = el('input', { class: 'search', type: 'search', placeholder: 'Search owner, company, address, city, phone…', value: P.q, 'data-keep': 'pq2',
+  const search = el('input', { class: 'search', type: 'search', placeholder: 'Search address, owner, LLC, city, phone…', value: P.q, 'data-keep': 'pq2',
     oninput: e => { P.q = e.target.value; clearTimeout(P.searchTimer); P.searchTimer = setTimeout(() => { P.page = 0; refreshProspects() }, 300) } })
   const pages = Math.max(1, Math.ceil(P.total / P_PAGE))
   return el('div', null,
     el('div', { class: 'head' },
-      el('div', null, el('h1', { text: 'Prospects' }), el('p', { class: 'muted', text: totalAll ? `${totalAll.toLocaleString()} owners · ${toCallAll.toLocaleString()} still to call` : 'Owners you haven’t talked to yet' })),
+      el('div', null, el('h1', { text: 'Prospects' }), el('p', { class: 'muted', text: totalAll ? `${totalAll.toLocaleString()} buildings · ${toCallAll.toLocaleString()} with owners still to call` : 'Buildings whose owners you haven’t talked to yet' })),
       el('div', { class: 'actions' },
         el('button', { class: 'btn', onclick: exportSkipTrace }, 'Skip-trace list'),
         el('button', { class: 'btn', onclick: () => openProspectForm() }, '+ Prospect'),
@@ -1558,7 +1585,7 @@ function prospectsView() {
       P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
     el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call (due first)' : k === 'never' && P.neverCount != null ? `${v} · ${P.neverCount.toLocaleString()}` : v))),
     el('div', { class: 'filters' }, search,
-      el('select', { class: 'chip', title: 'Checked against county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
+      el('select', { class: 'chip', title: 'Checked against the LLC (Sunbiz) and county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
     (() => {
       const d = phoneQuery(P.q.trim()); if (!d) return null
       const cs = S.contacts.filter(c => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d))
@@ -1570,62 +1597,117 @@ function prospectsView() {
       el('button', { class: 'btn primary', onclick: openImport }, 'Import CSV')) :
     el('div', { class: 'card' },
       P.loading && !P.rows.length ? el('div', { class: 'empty', text: 'Loading…' }) :
-      P.rows.length ? el('ul', { class: 'list' }, P.rows.map(r => {
-        const phones = [...(r.prospect_phones || [])].sort((a, b) => phoneRank(a.status) - phoneRank(b.status))
-        const live = phones.filter(ph => !PHONE_BAD.includes(ph.status))
-        const best = live[0]
-        const due = r.next_attempt_on && r.next_attempt_on <= T
-        return el('li', { class: 'item', onclick: () => openProspect(r.id) },
-          r.priority ? el('span', { class: 'pri ' + r.priority, text: r.priority }) : el('span', { class: 'pstat ' + slug(r.status), title: r.status }),
+      P.rows.length ? el('ul', { class: 'list' }, P.rows.map(b => {
+        const due = b.next_due && b.next_due <= T
+        const fuDue = b.callback_on && b.callback_on <= T
+        const st = bStatus(b)
+        return el('li', { class: 'item', onclick: () => openBuilding(b.id) },
+          b.priority ? el('span', { class: 'pri ' + b.priority, text: b.priority }) : el('span', { class: 'pstat ' + slug(st), title: st }),
           el('div', { class: 'who' },
-            el('div', { class: 'name' }, r.owner_name, r.company && r.company !== r.owner_name ? el('span', { class: 'muted', style: 'font-weight:400', text: r.company }) : null,
-              ownTag(r),
-              r.other_properties?.length ? el('span', { class: 'tag', text: `+${r.other_properties.length} bldg` }) : null,
-              r.attempts ? el('span', { class: 'tag', text: `${r.attempts} attempt${r.attempts > 1 ? 's' : ''}` }) : null,
-              r.callback_note || r.callback_time ? el('span', { class: due ? 'late' : 'tag fu', text: `📅 ${due ? 'follow-up due' : 'follow-up ' + fmt(r.next_attempt_on, { weekday: 'short', month: 'short', day: 'numeric' })}${r.callback_time ? ' · ' + fmtTime(r.callback_time) : ''}` })
-              : due && r.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
-            el('div', { class: 'sub', text: [r.callback_note ? '→ ' + r.callback_note : null, r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
-          best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
-      })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No prospects match.' })),
+            el('div', { class: 'name' }, bTitle(b), b.city ? el('span', { class: 'muted', style: 'font-weight:400', text: b.city }) : null,
+              b.n_people > 1 ? el('span', { class: 'tag', text: `${b.n_people} owners` }) : null,
+              b.has_verified ? el('span', { class: 'otag own-ok', text: '✓ verified' }) : null,
+              b.any_converted ? el('span', { class: 'tag', text: 'contact' }) : null,
+              b.attempts ? el('span', { class: 'tag', text: `${b.attempts} attempt${b.attempts > 1 ? 's' : ''}` }) : null,
+              b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
+              : due && b.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
+            el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })))
+      })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No buildings match.' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
       el('button', { class: 'btn small', disabled: P.page === 0, onclick: () => { P.page--; refreshProspects() } }, '‹ Prev'),
-      el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} owners` }),
+      el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} buildings` }),
       el('button', { class: 'btn small', disabled: P.page + 1 >= pages, onclick: () => { P.page++; refreshProspects() } }, 'Next ›')) : null)
 }
 function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage.setItem('pCounty', P.county) } catch { } P.rows = []; P.loading = true; render({ soft: true }); refreshProspects() }
 
-/* Prospect drawer */
-// Owners you've opened, in order — "Previous owner" walks back through them even after the list re-sorts
+/* Building drawer */
+// Buildings you've opened, in order — "Previous" walks back through them even after the list re-sorts
 const PHIST = []
-function prevProspectId(id) {
+const BCTX = { id: null, b: null, showRemoved: false }
+function prevBuildingId(id) {
   const i = PHIST.lastIndexOf(id)
   if (i > 0) return PHIST[i - 1]
   const j = P.rows.findIndex(x => x.id === id)
   return j > 0 ? P.rows[j - 1].id : null
 }
-async function goPrevProspect(r) {
-  const prev = prevProspectId(r.id)
-  if (!prev) { toast('This is the first owner'); return }
-  const i = PHIST.lastIndexOf(r.id)
+async function goPrevBuilding() {
+  const id = BCTX.id, prev = prevBuildingId(id)
+  if (!prev) { toast('This is the first building'); return }
+  const i = PHIST.lastIndexOf(id)
   if (i > 0) PHIST.length = i // drop the current one so Previous keeps stepping back
-  await openProspect(prev, { back: true })
+  await openBuilding(prev, { back: true })
 }
-async function openProspect(id, { back } = {}) {
+// Open the building a person belongs to (the one on screen if they're on it)
+async function openProspect(personId) {
+  if (BCTX.b && (BCTX.b.prospect_building_people || []).some(x => x.prospects?.id === personId)) return openBuilding(BCTX.id, { back: true })
+  const { data } = await sb.from('prospect_building_people').select('building_id').eq('prospect_id', personId).limit(1)
+  if (data?.[0]) return openBuilding(data[0].building_id)
+  toast('That prospect isn’t tied to a building')
+}
+async function openBuilding(id, { back } = {}) {
   if (!back && PHIST[PHIST.length - 1] !== id) { PHIST.push(id); if (PHIST.length > 200) PHIST.shift() }
-  const { data, error } = await sb.from('prospects').select('*, prospect_phones(*), prospect_calls(*)').eq('id', id).single()
+  const { data, error } = await sb.from('prospect_buildings')
+    .select('*, prospect_building_people(role, verified, prospects(*, prospect_phones(*), prospect_calls(*), prospect_building_people(building_id)))').eq('id', id).single()
   if (error) { toast(error.message); return }
+  BCTX.id = id; BCTX.b = data
   DRAWER.kind = null
-  showDrawer(prospectDetail(data))
+  showDrawer(buildingDetail(data))
 }
-function prospectDetail(r) {
-  const phones = [...(r.prospect_phones || [])].sort((a, b) => phoneRank(a.status) - phoneRank(b.status))
-  const calls = [...(r.prospect_calls || [])].sort((a, b) => String(b.called_at).localeCompare(String(a.called_at)))
-  const addr = [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ')
+const bPeople = b => (b.prospect_building_people || []).filter(x => x.prospects).map(x => ({ ...x.prospects, role: x.role, verified: x.verified }))
+const VER_ORDER = { 'LLC manager': 0, 'County owner': 1, Unverified: 2, 'Not on LLC/county': 3 }
+function buildingDetail(b) {
+  const all = bPeople(b)
+  const people = all.filter(r => r.status !== 'Removed').sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
+  const removed = all.filter(r => r.status === 'Removed')
+  const addr = [b.address, b.city, 'FL', b.zip].filter(Boolean).join(', ')
   const notes = el('textarea', { rows: 2, placeholder: 'Optional note for this attempt' })
+  BCTX.note = notes
+  const calls = all.flatMap(r => (r.prospect_calls || []).map(c => ({ ...c, who: r.owner_name }))).sort((a, c) => String(c.called_at).localeCompare(String(a.called_at)))
+  const ents = Array.isArray(b.entity_people) ? b.entity_people : []
+  return el('div', null,
+    el('div', { class: 'dhead' }, el('span', { class: 'bicon', text: '🏢' }), el('h2', { text: bTitle(b) })),
+    el('div', { class: 'actions', style: 'margin-top:6px' },
+      el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: [b.property_name ? b.address : null, b.city, b.county ? b.county + ' County' : null].filter(Boolean).join(' · ') || addr }),
+      b.pa_link ? el('a', { class: 'btn small ghost', href: b.pa_link, target: '_blank', rel: 'noopener' }, 'County record ↗') : null),
+    el('dl', { class: 'facts' },
+      (b.product_type || b.use_desc || b.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [b.product_type || (b.use_desc ? b.use_desc.toLowerCase() : null), b.building_sf ? num(b.building_sf) + ' SF' : null, b.year_built ? 'built ' + b.year_built : null].filter(Boolean).join(' · ') })] : null,
+      [el('dt', { text: 'County owner' }), el('dd', { text: b.owner_of_record || '—' })],
+      b.owner_mailing ? [el('dt', { text: 'Owner mailing' }), el('dd', { text: b.owner_mailing })] : null,
+      b.just_value ? [el('dt', { text: 'County value' }), el('dd', { text: money(b.just_value) })] : null,
+      b.last_sale_date || b.last_sale_price ? [el('dt', { text: 'Last sale' }), el('dd', { text: [b.last_sale_date ? fmt(b.last_sale_date, LONG) : null, b.last_sale_price > 100 ? money(b.last_sale_price) : null].filter(Boolean).join(' · ') })] : null,
+      b.parcel_id ? [el('dt', { text: 'Parcel' }), el('dd', { text: b.parcel_id })] : null),
+    ents.length ? el('div', { class: 'card', style: 'padding:10px 12px;margin:10px 0;font-size:13px;line-height:1.5' },
+      el('strong', { text: `On the ${b.owner_of_record || 'LLC'} filing (Sunbiz): ` }), ents.map(e => `${e.name}${e.title ? ' (' + e.title + ')' : ''}`).join(' · '),
+      b.entity_checked_at ? el('span', { class: 'muted', text: ` · checked ${fmt(String(b.entity_checked_at).slice(0, 10))}` }) : null) : null,
+    b.entity_info ? el('div', { class: 'card', style: 'padding:10px 12px;margin:10px 0;font-size:13px;line-height:1.45' }, el('strong', { text: 'Notes on ownership: ' }), b.entity_info) : null,
+    pitchTip(),
+    el('div', { class: 'section-title', text: `Owners & managers (${people.length})` }),
+    people.length ? people.map(r => personBlock(r, b, notes)) : el('p', { class: 'muted', text: 'No owner contacts on this building yet — skip trace the LLC managers.' }),
+    el('label', { class: 'f', style: 'margin-top:8px' }, 'Note (saved with the next outcome you tap)', notes),
+    el('div', { class: 'actions', style: 'margin-top:12px' },
+      el('button', { class: 'btn small', onclick: () => openProspectForm({ property_address: b.address, city: b.city, county: b.county, zip: b.zip, product_type: b.product_type, _building: b }) }, '+ Add an owner / manager'),
+      removed.length ? el('button', { class: 'btn small ghost', onclick: () => { BCTX.showRemoved = !BCTX.showRemoved; openBuilding(b.id, { back: true }) } }, `${BCTX.showRemoved ? 'Hide' : 'Show'} removed (${removed.length})`) : null),
+    BCTX.showRemoved && removed.length ? [el('div', { class: 'section-title', text: `Removed — not on the LLC or county records (${removed.length})` }),
+      removed.map(r => el('div', { class: 'person removed' },
+        el('div', { class: 'ph-head' }, el('b', { text: r.owner_name }), r.title ? el('span', { class: 'muted', text: r.title }) : null, verifyTag(r.verified)),
+        el('div', { class: 'muted', style: 'font-size:12.5px', text: (r.prospect_phones || []).map(p => p.phone).join(' · ') || 'no numbers' }),
+        el('button', { class: 'btn small', onclick: async e => { e.currentTarget.disabled = true; await sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', next_attempt_on: ymd(today()), updated_at: nowIso() }).eq('id', r.id); toast(`${r.owner_name} restored`); refreshProspects(); openBuilding(b.id, { back: true }) } }, 'Restore')))] : null,
+    el('div', { class: 'actions', style: 'margin-top:16px' },
+      el('button', { class: 'btn', disabled: !prevBuildingId(b.id), onclick: goPrevBuilding }, '← Previous building'),
+      el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => goNextProspect(null) }, 'Next building →')),
+    calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
+      el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' · ' + c.who }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
+}
+// One owner/manager on a building: their name, how they check out, and their numbers right underneath
+function personBlock(r, b, notes) {
+  const phones = [...(r.prospect_phones || [])].sort((a, c) => phoneRank(a.status) - phoneRank(c.status))
   const newPhone = el('input', { type: 'tel', placeholder: 'Add a number' })
+  const others = (r.prospect_building_people || []).filter(x => x.building_id !== b.id).length
+  const fuBox = prospectFollowUp(r)
+  if (!(r.callback_note || r.callback_time)) fuBox.classList.add('hidden')
   const phoneRow = ph => {
     const act = (label, outcome, statusTo) => el('button', { class: 'btn small' + (ph.status === statusTo ? ' on' : ''), onclick: e => { e.target.disabled = true; recordAttempt(r, ph, outcome, statusTo, notes.value.trim()) } }, label)
-    const lastNote = (r.prospect_calls || []).filter(c => c.phone_id === ph.id && c.notes).sort((a, b) => String(b.called_at).localeCompare(String(a.called_at)))[0]
+    const lastNote = (r.prospect_calls || []).filter(c => c.phone_id === ph.id && c.notes).sort((a, c) => String(c.called_at).localeCompare(String(a.called_at)))[0]
     return el('div', { class: 'pphone' + (PHONE_BAD.includes(ph.status) ? ' dead' : '') },
       el('div', { class: 'pp-top' },
         el('a', { class: 'tel', href: telHref(ph.phone), text: ph.phone }),
@@ -1633,7 +1715,7 @@ function prospectDetail(r) {
         el('span', { class: 'ptag ' + slug(ph.status), text: ph.status }),
         ph.attempts ? el('span', { class: 'muted', style: 'font-size:12px', text: `${ph.attempts}×${ph.last_called_at ? ' · last ' + fmt(ph.last_called_at.slice(0, 10)) : ''}` }) : null),
       lastNote ? el('div', { class: 'pp-note', text: `📝 ${fmt(String(lastNote.called_at).slice(0, 10))}: ${lastNote.notes}` }) : null,
-      el('div', { class: 'pp-acts' },
+      r.status === 'Converted' ? null : el('div', { class: 'pp-acts' },
         act('No answer', 'No answer', 'No answer'), act('Left VM', 'Left voicemail', 'Voicemail'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
@@ -1646,62 +1728,45 @@ function prospectDetail(r) {
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
   }
-  return el('div', null,
-    el('div', { class: 'dhead' }, r.priority ? el('span', { class: 'pri ' + r.priority, text: r.priority }) : null, el('h2', { text: r.owner_name })),
-    el('div', { class: 'actions', style: 'margin-top:6px' },
-      el('span', { class: 'muted', style: 'font-size:13px', text: 'Tag:' }),
+  return el('div', { class: 'person' + (r.status === 'Converted' ? ' converted' : '') },
+    el('div', { class: 'ph-head' },
+      r.priority ? el('span', { class: 'pri ' + r.priority, text: r.priority }) : null,
+      el('b', { class: 'pname', text: r.owner_name }),
+      r.title || r.role ? el('span', { class: 'muted', text: r.title || r.role }) : null,
+      verifyTag(r.verified),
+      el('span', { class: 'ptag ' + slug(r.status), text: r.status === 'Converted' ? 'Contact' : r.status }),
+      others ? el('span', { class: 'tag', title: 'This person is also on other buildings in your list', text: `+${others} other bldg` }) : null),
+    r.company || r.email || r.mailing_address ? el('div', { class: 'muted', style: 'font-size:12.5px;margin-top:2px', text: [r.company, r.email, r.mailing_address ? [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null].filter(Boolean).join(' · ') }) : null,
+    r.callback_note || r.callback_time ? el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Follow-up' }), el('b', { text: fmt(r.next_attempt_on, LONG) + (r.callback_time ? ' · ' + fmtTime(r.callback_time) : '') }), r.callback_note ? el('div', { text: r.callback_note }) : null) : null,
+    r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn small primary', style: 'margin:6px 0', onclick: () => openContact(r.converted_contact_id) }, 'Open contact card →') : null,
+    r.status === 'Converted' ? null : el('div', { class: 'actions', style: 'margin:6px 0 2px' },
+      el('span', { class: 'muted', style: 'font-size:12.5px', text: 'Tag:' }),
       ['A', 'B', 'C'].map(p => el('button', { class: 'chip pri-chip' + (r.priority === p ? ' on' : ''), title: r.priority === p ? 'Remove tag' : `Tag as ${p}`, onclick: async e => {
         e.currentTarget.disabled = true
         const v = r.priority === p ? null : p
         const { error } = await sb.from('prospects').update({ priority: v, updated_at: nowIso() }).eq('id', r.id)
         if (error) { toast(error.message); return }
         toast(v ? `${r.owner_name} tagged ${v}` : 'Tag removed'); refreshProspects(); openProspect(r.id)
-      } }, p)),
-      el('span', { class: 'ptag ' + slug(r.status), text: r.status }),
-      r.county ? el('span', { class: 'muted', text: r.county + ' County' }) : null,
-      r.next_attempt_on && !(r.callback_note || r.callback_time) ? el('span', { class: 'muted', text: 'Next try ' + fmt(r.next_attempt_on, LONG) }) : null),
-    r.callback_note || r.callback_time ? el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Follow-up' }), el('b', { text: fmt(r.next_attempt_on, LONG) + (r.callback_time ? ' · ' + fmtTime(r.callback_time) : '') }), r.callback_note ? el('div', { text: r.callback_note }) : null) : null,
-    el('dl', { class: 'facts' },
-      r.title ? [el('dt', { text: 'Title' }), el('dd', { text: r.title })] : null,
-      r.company ? [el('dt', { text: 'Company' }), el('dd', { text: r.company })] : null,
-      el('dt', { text: 'Property' }), el('dd', null, r.property_address ? el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: addr }) : '—'),
-      (r.product_type || r.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [r.product_type, r.building_sf ? num(r.building_sf) + ' SF' : null, r.year_built ? 'built ' + r.year_built : null].filter(Boolean).join(' · ') })] : null,
-      r.owner_of_record || r.ownership_check ? [el('dt', { text: 'County owner' }), el('dd', null, r.owner_of_record || '—', ' ', ownTag(r))] : null,
-      r.last_sale_date || r.last_sale_price ? [el('dt', { text: 'Last sale' }), el('dd', { text: [r.last_sale_date ? fmt(r.last_sale_date, LONG) : null, r.last_sale_price > 100 ? money(r.last_sale_price) : null].filter(Boolean).join(' · ') })] : null,
-      r.mailing_address ? [el('dt', { text: 'Mailing' }), el('dd', { text: [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') })] : null,
-      r.email ? [el('dt', { text: 'Email' }), el('dd', null, el('a', { href: 'mailto:' + r.email, text: r.email }))] : null,
-      r.parcel_id ? [el('dt', { text: 'Parcel' }), el('dd', { text: r.parcel_id })] : null,
-      r.source ? [el('dt', { text: 'Source' }), el('dd', { text: r.source })] : null,
-      r.notes ? [el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: r.notes })] : null),
-    r.entity_info ? el('div', { class: 'card', style: 'padding:10px 12px;margin:10px 0;font-size:13px;line-height:1.45' }, el('strong', { text: 'Who owns it (Sunbiz / county): ' }), r.entity_info) : null,
-    r.ownership_check === 'Different owner' && !r.entity_info ? el('p', { class: 'muted', style: 'font-size:12.5px', text: `Heads up: the county lists ${r.owner_of_record} as owner, not ${r.owner_name}${r.company ? ' / ' + r.company : ''}. They may own it through that entity, or they may just work there — confirm on the call.` }) : null,
-    r.other_properties?.length ? [el('div', { class: 'section-title', text: `Other buildings on this list (${r.other_properties.length})` }),
-      el('ul', { class: 'plain' }, r.other_properties.map(o => { const a = [o.address, o.city, 'FL', o.zip].filter(Boolean).join(', '); return el('li', null, el('a', { href: mapsHref(a), target: '_blank', rel: 'noopener', text: a }), el('span', { class: 'muted', text: ' · ' + [o.sf ? num(o.sf) + ' SF' : null, o.year_built ? 'built ' + o.year_built : null, o.entity].filter(Boolean).join(' · ') })) }))] : null,
-    r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn primary', onclick: () => openContact(r.converted_contact_id) }, 'Open contact →') : null,
-    pitchTip(),
-    el('div', { class: 'section-title', text: `Numbers (${phones.length})` }),
-    phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', text: 'No numbers — this owner needs skip tracing.' }),
-    el('label', { class: 'f', style: 'margin-top:8px' }, 'Note (saved with the next outcome you tap)', notes),
-    el('div', { class: 'doc-add', style: 'grid-template-columns:1fr auto;margin-top:10px' }, newPhone,
-      el('button', { class: 'btn small', onclick: async () => {
-        const v = newPhone.value.trim(); if (v.replace(/\D/g, '').length < 7) return
-        const { error } = await sb.from('prospect_phones').insert({ prospect_id: r.id, phone: fmtPhone(v) })
-        if (error) { toast(error.message); return }
-        if (r.status === 'Bad data') await sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', updated_at: nowIso() }).eq('id', r.id)
-        openProspect(r.id); refreshProspects()
-      } }, 'Add number')),
-    prospectFollowUp(r),
-    el('div', { class: 'actions', style: 'margin-top:16px' },
-      el('button', { class: 'btn primary', onclick: () => openConvert(r, null, { meeting: true }) }, '📅 Meeting set'),
-      el('button', { class: 'btn', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
-      el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
-      el('button', { class: 'btn', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
-      el('button', { class: 'btn ghost', onclick: () => openProspectForm(r) }, 'Edit'),
-      el('button', { class: 'btn danger', onclick: e => deleteProspect(r, e.currentTarget) }, 'Delete'),
-      el('button', { class: 'btn', style: 'margin-left:auto', disabled: !prevProspectId(r.id), onclick: () => goPrevProspect(r) }, '← Previous owner'),
-      el('button', { class: 'btn', onclick: () => goNextProspect(r) }, 'Next owner →')),
-    calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
-      el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
+      } }, p))),
+    phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', style: 'margin:6px 0', text: 'No numbers — skip trace this person.' }),
+    r.status === 'Converted' ? null : [
+      el('div', { class: 'doc-add', style: 'grid-template-columns:1fr auto;margin-top:8px' }, newPhone,
+        el('button', { class: 'btn small', onclick: async () => {
+          const v = newPhone.value.trim(); if (v.replace(/\D/g, '').length < 7) return
+          const { error } = await sb.from('prospect_phones').insert({ prospect_id: r.id, phone: fmtPhone(v) })
+          if (error) { toast(error.message); return }
+          if (r.status === 'Bad data') await sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', next_attempt_on: ymd(today()), updated_at: nowIso() }).eq('id', r.id)
+          openProspect(r.id); refreshProspects()
+        } }, 'Add number')),
+      fuBox,
+      el('div', { class: 'actions', style: 'margin-top:8px' },
+        el('button', { class: 'btn small primary', onclick: () => openConvert(r, null, { meeting: true }) }, '📅 Meeting set'),
+        el('button', { class: 'btn small', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
+        el('button', { class: 'btn small', onclick: () => fuBox.classList.toggle('hidden') }, '📅 Follow-up'),
+        el('button', { class: 'btn small', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
+        el('button', { class: 'btn small', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
+        el('button', { class: 'btn small ghost', onclick: () => openProspectForm(r) }, 'Edit'),
+        el('button', { class: 'btn small danger', onclick: e => deleteProspect(r, e.currentTarget) }, 'Delete'))])
 }
 
 async function recordAttempt(r, ph, outcome, phoneStatus, note) {
@@ -1719,19 +1784,22 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   ])
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
   const msg = status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`
-  // Every number on the card tried today (or dead)? Move straight to the next owner in the list.
+  // Every number for every owner on this building tried today (or dead)? Move straight to the next building.
   const todayStr = ymd(T)
-  const cardDone = phones.every(x => PHONE_BAD.includes(x.status) || (x.last_called_at && ymd(new Date(x.last_called_at)) === todayStr))
+  const tried = x => PHONE_BAD.includes(x.status) || (x.last_called_at && ymd(new Date(x.last_called_at)) === todayStr)
+  const others = BCTX.b ? bPeople(BCTX.b).filter(x => x.id !== r.id && ['New', 'Attempted'].includes(x.status)) : []
+  const cardDone = phones.every(tried) && others.every(o => (o.prospect_phones || []).every(tried))
   if (cardDone) return goNextProspect(r, msg)
   toast(msg); refreshProspects(); openProspect(r.id)
 }
-// Open the owner that comes after this one in the current list (captured before the list refreshes)
+// Open the building that comes after the current one in the list (captured before the list refreshes)
 async function goNextProspect(r, msg) {
-  const i = P.rows.findIndex(x => x.id === r.id)
-  const next = P.rows.slice(i + 1).find(x => x.id !== r.id) || P.rows.find(x => x.id !== r.id)
+  const cur = BCTX.id
+  const i = P.rows.findIndex(x => x.id === cur)
+  const next = P.rows.slice(i + 1).find(x => x.id !== cur) || P.rows.find(x => x.id !== cur)
   await refreshProspects()
-  if (next) { toast((msg ? msg + ' · ' : '') + `Next: ${next.owner_name}`); openProspect(next.id) }
-  else { toast((msg ? msg + ' · ' : '') + 'That was the last one on this page'); closeDrawer() }
+  if (next) { toast((msg ? msg + ' · ' : '') + `Next: ${bTitle(next)}`); openBuilding(next.id) }
+  else { toast((msg ? msg + ' · ' : '') + 'That was the last building on this page'); closeDrawer() }
 }
 async function resetPhone(r, ph) {
   const now = nowIso()
@@ -1748,7 +1816,10 @@ async function setProspectStatus(r, status, outcome) {
   await sb.from('prospect_calls').insert({ prospect_id: r.id, outcome })
   const { error } = await sb.from('prospects').update({ status, next_attempt_on: null, last_attempt_at: now, updated_at: now }).eq('id', r.id)
   if (error) { toast(error.message); return }
-  goNextProspect(r, `${r.owner_name}: ${status}`)
+  // Co-owners on this building still to call? Stay on the building; otherwise move on
+  const left = BCTX.b ? bPeople(BCTX.b).filter(x => x.id !== r.id && ['New', 'Attempted'].includes(x.status)) : []
+  if (left.length) { toast(`${r.owner_name}: ${status}`); refreshProspects(); openBuilding(BCTX.id, { back: true }) }
+  else goNextProspect(r, `${r.owner_name}: ${status}`)
 }
 
 /* Talked → becomes a real contact */
@@ -1758,7 +1829,13 @@ function openConvert(r, ph, { meeting } = {}) {
   const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === defPri })))
   const mDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
   const mTime = el('input', { type: 'time', value: '10:00' })
-  const mWhere = el('input', { placeholder: 'At the property, their office, Zoom…', value: meeting && r.property_address ? 'At the property — ' + r.property_address : '' })
+  // Buildings this person is tied to — the one on screen first; a meeting is linked to the one you pick
+  const myB = [BCTX.b && bPeople(BCTX.b).some(x => x.id === r.id) ? BCTX.id : null, ...(r.prospect_building_people || []).map(x => x.building_id)].filter((v, i, a) => v && a.indexOf(v) === i)
+  const curB = BCTX.b && BCTX.id === myB[0] ? BCTX.b : null
+  const about = el('select', null, myB.map((bid, i) => el('option', { value: bid, text: bid === BCTX.id && curB ? bTitle(curB) : `Building #${i + 1}`, selected: i === 0 })))
+  if (myB.length > 1) sb.from('prospect_buildings').select('id,address,property_name,city').in('id', myB).then(({ data }) => { for (const o of about.options) { const x = (data || []).find(d => String(d.id) === o.value); if (x) o.textContent = [bTitle(x), x.city].filter(Boolean).join(', ') } })
+  const mWhere = el('input', { placeholder: 'At the property, their office, Zoom…', value: meeting ? 'At the property — ' + ((curB && curB.address) || r.property_address || '') : '' })
+  about.onchange = async () => { if (!meeting) return; const { data } = await sb.from('prospect_buildings').select('address').eq('id', about.value).single(); if (data && /^At the property/.test(mWhere.value)) mWhere.value = 'At the property — ' + data.address }
   const meetWhen = () => `${fmt(mDate.value, { weekday: 'short', month: 'short', day: 'numeric' })}${mTime.value ? ' at ' + fmtTime(mTime.value) : ''}${mWhere.value.trim() ? ' — ' + mWhere.value.trim() : ''}`
   const type = el('select', null, TYPES.map(t => el('option', { value: t, text: t, selected: t === 'Seller' })))
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?' })
@@ -1788,8 +1865,19 @@ function openConvert(r, ph, { meeting } = {}) {
         next_note: meeting ? 'MEETING ' + meetWhen() : nextNote.value.trim() || null, last_contact: ymd(T),
         notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
       const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
-      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: convNote }); if (e2) throw e2
-      if (r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso() })
+      // Every building this person owns goes on their one contact card; the one you're discussing moves along the pipeline
+      const { data: blds } = myB.length ? await sb.from('prospect_buildings').select('*').in('id', myB) : { data: [] }
+      let aboutPropId = null
+      for (const bid of myB) {
+        const x = (blds || []).find(d => d.id === bid); if (!x) continue
+        const isAbout = String(bid) === String(about.value)
+        const { data: pr } = await sb.from('properties').insert({ contact_id: id, name: x.property_name || null, address: x.address, address_query: [x.address, x.city, 'FL', x.zip].filter(Boolean).join(', '), city: x.city, county: x.county, lat: x.lat, lng: x.lng,
+          parcel_id: x.parcel_id, product_type: x.product_type, building_sf: x.building_sf, year_built: x.year_built, just_value: x.just_value, owner_of_record: x.owner_of_record, owner_mailing: x.owner_mailing, pa_link: x.pa_link, use_code: x.use_code,
+          stage: isAbout ? (meeting ? 'Meeting' : 'Contacted') : 'Contacted', stage_updated_at: nowIso() }).select('id').single()
+        if (isAbout && pr) aboutPropId = pr.id
+      }
+      if (!myB.length && r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso() })
+      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: convNote, property_id: aboutPropId }); if (e2) throw e2
       if (ph) await sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: nowIso() }).eq('id', ph.id)
       await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: meeting ? `Reached — meeting set → contact (${pri.value})${ph ? ' (' + ph.phone + ')' : ''}` : `Talked → contact (${pri.value})`, notes: convNote })
       await sb.from('prospects').update({ status: 'Converted', converted_contact_id: id, next_attempt_on: null, last_attempt_at: nowIso(), attempts: (r.attempts || 0) + 1, updated_at: nowIso() }).eq('id', r.id)
@@ -1798,8 +1886,9 @@ function openConvert(r, ph, { meeting } = {}) {
     } catch (x) { err.textContent = x.message || String(x); save.disabled = false }
   } },
     el('h2', { text: (meeting ? '📅 Meeting set with ' : 'Talked to ') + r.owner_name }),
-    el('p', { class: 'muted', text: meeting ? 'They become a contact, the meeting goes on your calendar and counts in your KPIs, and their building moves to the Meeting stage.' : 'They move into your contacts with a priority and cadence, and their building goes on the map and pipeline.' }),
+    el('p', { class: 'muted', text: (meeting ? 'They become a contact, the meeting goes on your calendar and counts in your KPIs, and the building moves to the Meeting stage.' : 'They move into your contacts with a priority and cadence.') + (myB.length > 1 ? ` All ${myB.length} of their buildings go on their contact card.` : '') + ' Anyone else on the building stays callable and shows on their card as a co-owner.' }),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Priority', pri), el('label', { class: 'f' }, 'Type', type)),
+    myB.length > 1 ? el('label', { class: 'f' }, meeting ? 'Meeting is about' : 'Talked about', about) : null,
     meeting ? [el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Meeting date', mDate), el('label', { class: 'f' }, 'Time', mTime)), el('label', { class: 'f' }, 'Where', mWhere)] : null,
     el('label', { class: 'f' }, meeting ? 'Notes from the call (optional)' : 'Notes from the call', notes),
     meeting ? null : [el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
@@ -1831,7 +1920,7 @@ function openProspectForm(r = {}) {
     if (list.length) await sb.from('prospect_phones').upsert(list.map(p => ({ prospect_id: id, phone: fmtPhone(p) })), { onConflict: 'prospect_id,digits', ignoreDuplicates: true })
     refreshProspects(); openProspect(id)
   } },
-    el('h2', { text: editing ? 'Edit prospect' : 'New prospect' }),
+    el('h2', { text: editing ? 'Edit prospect' : r._building ? 'Add an owner / manager to ' + bTitle(r._building) : 'New prospect' }),
     el('label', { class: 'f' }, 'Owner name', f.owner_name), el('label', { class: 'f' }, 'Company / entity', f.company),
     el('label', { class: 'f' }, 'Property address', f.property_address),
     el('div', { class: 'row3' }, el('label', { class: 'f' }, 'City', f.city), el('label', { class: 'f' }, 'County', f.county), el('label', { class: 'f' }, 'ZIP', f.zip)),
@@ -1839,7 +1928,7 @@ function openProspectForm(r = {}) {
     el('label', { class: 'f' }, 'Mailing address', f.mailing_address),
     el('label', { class: 'f' }, editing ? 'Add phone numbers' : 'Phone numbers', phones),
     el('label', { class: 'f' }, 'Notes', notes),
-    err, el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'submit' }, 'Save'), el('button', { class: 'btn', type: 'button', onclick: () => editing ? openProspect(r.id) : closeDrawer() }, 'Cancel')))
+    err, el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'submit' }, 'Save'), el('button', { class: 'btn', type: 'button', onclick: () => editing ? openProspect(r.id) : r._building ? openBuilding(r._building.id, { back: true }) : closeDrawer() }, 'Cancel')))
   DRAWER.kind = null
   showDrawer(form)
 }
@@ -2222,7 +2311,8 @@ function meetingCard(v, { kindLabel } = {}) {
         el('div', { class: 'name' }, el('b', { text: c.name }), c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null),
         el('div', { class: 'muted', style: 'font-size:13px', text: [c.company, fmt(v.talked_on, LONG) + (kindLabel ? ' · ' + kindLabel : '')].filter(Boolean).join(' · ') })),
       tel ? el('a', { class: 'btn small', href: tel, text: c.phone }) : null),
-    props.length ? el('div', { class: 'mc-props' }, props.map(p => el('a', { class: 'chip', onclick: () => openProperty(p.id) }, `${p.address || p.name}${p.stage ? ' · ' + p.stage : ''}`))) : null,
+    v.property_id && propLabel(v.property_id) ? el('div', { style: 'margin-top:8px' }, el('span', { class: 'retag', text: '🏢 Re: ' + propLabel(v.property_id) })) : null,
+    props.length ? el('div', { class: 'mc-props' }, props.map(p => el('a', { class: 'chip' + (String(p.id) === String(v.property_id) ? ' on' : ''), onclick: () => openProperty(p.id) }, `${p.address || p.name}${p.stage ? ' · ' + p.stage : ''}`))) : null,
     el('div', { class: 'mc-notes', text: v.notes }),
     sameDayNotes(v).map(x => el('div', { class: 'mc-notes extra', text: x.notes })),
     c.next_follow_up ? el('div', { class: 'muted', style: 'font-size:13px;margin-top:8px', text: `Next: ${fmt(c.next_follow_up, LONG)}${c.next_time ? ' · ' + fmtTime(c.next_time) : ''}${c.next_note ? ' — ' + c.next_note : ''}` }) : null,
@@ -2266,6 +2356,12 @@ function openMeetingForm({ contactId } = {}) {
   const date = el('input', { type: 'date', value: ymd(T) })
   const time = el('input', { type: 'time' })
   const where = el('input', { placeholder: 'At the property, their office, Zoom…' })
+  const aboutWrap = el('label', { class: 'f' }, 'Meeting is about')
+  let about = propertyPicker(contactId || '')
+  aboutWrap.append(about)
+  const syncAbout = () => { const n = propertyPicker(who.value); about.replaceWith(n); about = n; aboutWrap.classList.toggle('hidden', !propsFor(who.value).length) }
+  who.addEventListener('change', syncAbout)
+  if (!propsFor(contactId || '').length) aboutWrap.classList.add('hidden')
   const notes = el('textarea', { rows: 7, placeholder: 'What you learned — goals, timing, debt, tenants, other buildings, buy box, rapport notes…' })
   const nextDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
   const nextTime = el('input', { type: 'time' })
@@ -2296,9 +2392,9 @@ function openMeetingForm({ contactId } = {}) {
     try {
       if (isSet) {
         const when = `${fmt(date.value, { weekday: 'short', month: 'short', day: 'numeric' })}${t}${place}`
-        await logCall(c, { note: 'Meeting set for ' + when + body, talked: ymd(T), priority: pri.value || c.priority || 'C', next: date.value, nextTime: time.value || null, nextNote: 'MEETING ' + when, meeting: true })
+        await logCall(c, { note: 'Meeting set for ' + when + body, talked: ymd(T), priority: pri.value || c.priority || 'C', next: date.value, nextTime: time.value || null, nextNote: 'MEETING ' + when, meeting: true, propertyId: about.value || null })
       } else {
-        await logCall(c, { note: 'Meeting held' + place + body, talked: date.value, priority: pri.value || c.priority || 'C', next: nextDate.value || null, nextTime: nextTime.value || null, nextNote: nextStep.value.trim() || 'Follow up from meeting ' + fmt(date.value), meeting: true })
+        await logCall(c, { note: 'Meeting held' + place + body, talked: date.value, priority: pri.value || c.priority || 'C', next: nextDate.value || null, nextTime: nextTime.value || null, nextNote: nextStep.value.trim() || 'Follow up from meeting ' + fmt(date.value), meeting: true, propertyId: about.value || null })
       }
       toast(isSet ? 'Meeting set' : 'Meeting logged'); closeDrawer(); render({ soft: true })
     } catch (x) { err.textContent = 'Couldn’t save: ' + (x.message || x); save.disabled = false }
@@ -2308,6 +2404,7 @@ function openMeetingForm({ contactId } = {}) {
     el('label', { class: 'f' }, 'Type', kind),
     el('div', { class: 'row2' }, el('label', { class: 'f' }, dateLbl, date), el('label', { class: 'f' }, 'Time (optional)', time)),
     el('label', { class: 'f' }, 'Where', where),
+    aboutWrap,
     el('label', { class: 'f' }, 'Meeting notes', notes),
     el('label', { class: 'f' }, 'Priority', pri),
     nextBox, err, el('div', { class: 'actions' }, save))
@@ -2421,17 +2518,51 @@ function prospectFollowUp(r) {
 /* Delete a prospect (and its numbers). Past dials stay in the call log so KPIs don't change. */
 async function deleteProspect(r, btn) {
   const n = (r.prospect_phones || []).length
-  if (!confirm(`Delete ${r.owner_name}${r.property_address ? ' (' + r.property_address + ')' : ''} from your prospect list?\n\nThis removes the card and its ${n} number${n === 1 ? '' : 's'}. Calls you already made still count in your KPIs. This can't be undone.`)) return
+  if (!confirm(`Delete ${r.owner_name} from your prospect list?\n\nThis removes them and their ${n} number${n === 1 ? '' : 's'} from every building they're on. Calls you already made still count in your KPIs. This can't be undone.`)) return
   btn.disabled = true
-  // Find who comes next before the list refreshes
-  const i = P.rows.findIndex(x => x.id === r.id)
-  const next = P.rows.slice(i + 1).find(x => x.id !== r.id) || P.rows.slice(0, Math.max(0, i)).reverse().find(x => x.id !== r.id)
+  const left = BCTX.b ? bPeople(BCTX.b).filter(x => x.id !== r.id && x.status !== 'Removed') : []
   const { error } = await sb.from('prospects').delete().eq('id', r.id)
   if (error) { toast('Couldn’t delete: ' + error.message); btn.disabled = false; return }
-  const h = PHIST.lastIndexOf(r.id); if (h >= 0) PHIST.splice(h, 1)
-  await refreshProspects()
-  if (next) { toast(`${r.owner_name} deleted · Next: ${next.owner_name}`); openProspect(next.id) }
-  else { toast(`${r.owner_name} deleted`); closeDrawer() }
+  if (left.length) { toast(`${r.owner_name} deleted`); refreshProspects(); openBuilding(BCTX.id, { back: true }) }
+  else goNextProspect(null, `${r.owner_name} deleted`)
+}
+
+
+/* Co-owners: other owners/managers on this contact's buildings (from the prospect list), shown apart from the contact */
+const COOWN = {}
+function coOwnersSection(c) {
+  const props = propsFor(c.id)
+  if (!props.length) return null
+  const key = c.id + '|' + props.map(p => p.id).join(',')
+  const cache = COOWN[c.id]
+  if (!cache || cache.key !== key) {
+    COOWN[c.id] = { key, rows: null }
+    const keys = [...new Set(props.map(p => bkeyOf(p.address, p.city)))]
+    sb.from('prospect_buildings').select('id, address, city, property_name, prospect_building_people(role, verified, prospects(id, owner_name, title, company, status, converted_contact_id, prospect_phones(phone, status)))').in('bkey', keys)
+      .then(({ data }) => { if (COOWN[c.id]?.key !== key) return; COOWN[c.id].rows = data || []; if (DRAWER.kind === 'contact' && DRAWER.id === c.id) refreshDrawer() })
+    return null
+  }
+  if (!cache.rows) return null
+  const items = []
+  for (const b of cache.rows) for (const x of b.prospect_building_people || []) {
+    const r = x.prospects
+    if (!r || r.converted_contact_id === c.id || r.status === 'Removed') continue
+    items.push({ b, r, role: x.role, verified: x.verified })
+  }
+  if (!items.length) return null
+  return el('div', { class: 'coowners' },
+    el('div', { class: 'section-title', style: 'margin-top:0', text: `Co-owners & managers (${items.length})` }),
+    el('p', { class: 'muted', style: 'font-size:12.5px;margin:0 0 4px', text: `Other people on ${c.name.split(' ')[0]}’s buildings — not ${c.name.split(' ')[0]}.` }),
+    items.map(({ b, r, role, verified }) => {
+      const live = (r.prospect_phones || []).filter(p => !PHONE_BAD.includes(p.status))
+      return el('div', { class: 'coowner' },
+        el('div', { class: 'ph-head' }, el('span', { class: 'cotag', text: 'Co-owner' }), el('b', { text: r.owner_name }), r.title || role ? el('span', { class: 'muted', text: r.title || role }) : null, verifyTag(verified),
+          r.status === 'Converted' ? el('span', { class: 'ptag converted', text: 'Contact' }) : el('span', { class: 'ptag ' + slug(r.status), text: r.status })),
+        el('div', { class: 'muted', style: 'font-size:12.5px', text: '🏢 ' + [bTitle(b), b.city].filter(Boolean).join(', ') + (r.company ? ' · ' + r.company : '') }),
+        live.length ? el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-top:4px' }, live.map(p => el('a', { class: 'tel', href: telHref(p.phone), text: p.phone }))) : el('div', { class: 'muted', style: 'font-size:12.5px', text: 'No working numbers' }),
+        el('div', { class: 'actions', style: 'margin-top:6px' },
+          r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn small', onclick: () => openContact(r.converted_contact_id) }, 'Open their contact card') : el('button', { class: 'btn small', onclick: () => { go('prospects'); openBuilding(b.id) } }, 'Call from the building card')))
+    }))
 }
 
 boot()
