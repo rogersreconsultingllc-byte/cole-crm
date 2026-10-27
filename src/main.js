@@ -315,7 +315,8 @@ const stat = (n, label, onclick) => el('div', { class: 'card stat' + (onclick ? 
 /* ---------- Contacts ---------- */
 // Phone search: "941-628-2030", "(941) 628 2030", "6282030", "+1 941…" all match the same number
 function phoneQuery(q) {
-  if (!/^[\d\s()+.\-]+$/.test(q || '')) return null
+  q = String(q || '')
+  if (/[a-z]/i.test(q)) return null // has letters → it's a name/address search
   let d = q.replace(/\D/g, '')
   if (d.length === 11 && d[0] === '1') d = d.slice(1)
   return d.length >= 4 ? d : null
@@ -327,9 +328,9 @@ const PHQ = { q: null, rows: [], busy: false }
 async function findProspectsByPhone(d) {
   if (PHQ.q === d) return
   PHQ.q = d; PHQ.busy = true; PHQ.rows = []
-  const { data } = await sb.from('prospect_phones').select('phone, status, prospects(id, owner_name, company, property_address, city, status)').ilike('phone', phoneLike(d)).limit(25)
+  const { data } = await sb.from('prospect_phones').select('phone, status, prospects(id, owner_name, company, property_address, city, status)').like('digits', `%${d}%`).limit(25)
   if (PHQ.q !== d) return
-  PHQ.busy = false; PHQ.rows = (data || []).filter(r => r.prospects && digitsOf(r.phone).includes(d))
+  PHQ.busy = false; PHQ.rows = (data || []).filter(r => r.prospects)
   if (S.tab === 'contacts') render({ soft: true })
 }
 function matches(c, q) {
@@ -1518,9 +1519,9 @@ async function loadProspects() {
   const pd = phoneQuery(P.q.trim())
   const term = P.q.trim().replace(/[%,()*]/g, ' ').trim()
   if (pd) {
-    const { data: hits } = await sb.from('prospect_phones').select('prospect_id, phone').ilike('phone', phoneLike(pd)).limit(1000)
+    const { data: hits } = await sb.from('prospect_phones').select('prospect_id').like('digits', `%${pd}%`).limit(1000)
     if (my !== P.reqId) return
-    const ids = [...new Set((hits || []).filter(h => digitsOf(h.phone).includes(pd)).map(h => h.prospect_id))]
+    const ids = [...new Set((hits || []).map(h => h.prospect_id))]
     q = q.in('id', ids.length ? ids : [-1])
   } else if (term) q = q.or(`owner_name.ilike.*${term}*,property_address.ilike.*${term}*,company.ilike.*${term}*,city.ilike.*${term}*`)
   if (P.status === 'tocall') q = q.order('callback_note', { ascending: true, nullsFirst: false }).order('next_attempt_on').order('attempts').order('own_rank').order('next_attempt_on').order('owner_name') // never-called owners first, callbacks after
@@ -1558,6 +1559,11 @@ function prospectsView() {
     el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call (due first)' : k === 'never' && P.neverCount != null ? `${v} · ${P.neverCount.toLocaleString()}` : v))),
     el('div', { class: 'filters' }, search,
       el('select', { class: 'chip', title: 'Checked against county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
+    (() => {
+      const d = phoneQuery(P.q.trim()); if (!d) return null
+      const cs = S.contacts.filter(c => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d))
+      return cs.length ? [el('div', { class: 'section-title', text: `In your contacts (${cs.length})` }), el('div', { class: 'card', style: 'margin-bottom:10px' }, el('ul', { class: 'list' }, cs.map(c => contactRow(c))))] : null
+    })(),
     !totalAll && P.loaded ? el('div', { class: 'card empty-state' },
       el('h3', { text: 'No prospects yet' }),
       el('p', { class: 'muted', text: 'Import a CSV of owners (name, property address, county, and any phone columns). Excel files: File → Save As → CSV. Or send the file to Claude and it will load it for you.' }),
@@ -1580,7 +1586,7 @@ function prospectsView() {
               : due && r.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
             el('div', { class: 'sub', text: [r.callback_note ? '→ ' + r.callback_note : null, r.title, r.property_address, r.city, r.building_sf ? num(r.building_sf) + ' SF' : r.product_type, `${live.length}/${phones.length} numbers live`].filter(Boolean).join(' · ') })),
           best ? el('a', { class: 'tel', href: telHref(best.phone), onclick: e => e.stopPropagation(), text: best.phone }) : el('span', { class: 'tag', text: 'no number' }))
-      })) : el('div', { class: 'empty', text: P.loaded ? 'No prospects match.' : 'Loading…' })),
+      })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No prospects match.' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
       el('button', { class: 'btn small', disabled: P.page === 0, onclick: () => { P.page--; refreshProspects() } }, '‹ Prev'),
       el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} owners` }),
