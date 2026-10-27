@@ -1649,7 +1649,7 @@ async function openProspect(personId) {
 async function openBuilding(id, { back } = {}) {
   if (!back && PHIST[PHIST.length - 1] !== id) { PHIST.push(id); if (PHIST.length > 200) PHIST.shift() }
   const { data, error } = await sb.from('prospect_buildings')
-    .select('*, prospect_building_people(role, verified, prospects(*, prospect_phones(*), prospect_calls(*), prospect_building_people(building_id)))').eq('id', id).single()
+    .select('*, prospect_building_people(role, verified, prospects(*, prospect_phones(*), prospect_calls(*), prospect_building_people(building_id, verified)))').eq('id', id).single()
   if (error) { toast(error.message); return }
   BCTX.id = id; BCTX.b = data
   DRAWER.kind = null
@@ -1659,8 +1659,10 @@ const bPeople = b => (b.prospect_building_people || []).filter(x => x.prospects)
 const VER_ORDER = { 'LLC manager': 0, 'County owner': 1, Unverified: 2, 'Not on LLC/county': 3 }
 function buildingDetail(b) {
   const all = bPeople(b)
-  const people = all.filter(r => r.status !== 'Removed').sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
-  const removed = all.filter(r => r.status === 'Removed')
+  // Hidden here: removed people, and anyone verified on another building but not on this one's LLC/county records
+  const offHere = r => r.verified === 'Not on LLC/county' && r.status !== 'Converted' && (r.prospect_building_people || []).some(x => x.building_id !== b.id && ['County owner', 'LLC manager'].includes(x.verified))
+  const people = all.filter(r => r.status !== 'Removed' && !offHere(r)).sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
+  const removed = all.filter(r => r.status === 'Removed' || offHere(r))
   const addr = [b.address, b.city, 'FL', b.zip].filter(Boolean).join(', ')
   const notes = el('textarea', { rows: 2, placeholder: 'Optional note for this attempt' })
   BCTX.note = notes
