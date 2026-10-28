@@ -2113,7 +2113,7 @@ const WEEK_GOALS = { dials: [200, 250, 300], mheld: [2, 2.4, 3.2], mset: [2, 2.4
 const TIER = ['Floor', 'Target', 'Game']
 const goalYearStart = () => { try { return localStorage.getItem('goalYearStart') || '2026-09-23' } catch { return '2026-09-23' } }
 const MEET_SET_RE = /\b(meeting (is )?(set|booked|scheduled|confirmed)|(set|booked|scheduled) (a |an |the )?(meeting|appointment|walk-?through)|meeting on (mon|tue|wed|thu|fri|sat|sun)|meet(ing)? (with )?(him|her|them) (on|at|next))/
-const MEET_NEG_RE = /\b(no meeting|not (set|booked)|didn'?t (set|book)|won'?t meet|doesn'?t want to meet|declined (a |the )?meeting|without (a |setting a )?meeting)\b/
+const MEET_NEG_RE = /\b(no meeting|not (set|booked)|didn'?t (set|book)|won'?t meet|doesn'?t want to meet|declined (a |the )?meeting|without (a |setting a )?meeting|to (set|book|schedule)|needs? to (set|book))\b/
 // A call note that set a meeting is still a conversation (counts as a dial + conversation too)
 const isTalkMeeting = n => { const l = String(n || '').trim().toLowerCase(); return !/^(meeting set|booked in-person meeting)/.test(l) && MEET_SET_RE.test(l) && !MEET_NEG_RE.test(l) }
 function convKind(n) {
