@@ -2112,12 +2112,18 @@ const WORK_WEEKS = 50
 const WEEK_GOALS = { dials: [200, 250, 300], mheld: [2, 2.4, 3.2], mset: [2, 2.4, 3.2], bov: [1, 1.2, 1.6] }
 const TIER = ['Floor', 'Target', 'Game']
 const goalYearStart = () => { try { return localStorage.getItem('goalYearStart') || '2026-09-23' } catch { return '2026-09-23' } }
+const MEET_SET_RE = /\b(meeting (is )?(set|booked|scheduled|confirmed)|(set|booked|scheduled) (a |an |the )?(meeting|appointment|walk-?through)|meeting on (mon|tue|wed|thu|fri|sat|sun)|meet(ing)? (with )?(him|her|them) (on|at|next))/
+const MEET_NEG_RE = /\b(no meeting|not (set|booked)|didn'?t (set|book)|won'?t meet|doesn'?t want to meet|declined (a |the )?meeting|without (a |setting a )?meeting)\b/
+// A call note that set a meeting is still a conversation (counts as a dial + conversation too)
+const isTalkMeeting = n => { const l = String(n || '').trim().toLowerCase(); return !/^(meeting set|booked in-person meeting)/.test(l) && MEET_SET_RE.test(l) && !MEET_NEG_RE.test(l) }
 function convKind(n) {
   const t = String(n || '').trim(), l = t.toLowerCase()
   if (/^(no answer|didnt answer|didn't answer)/.test(l) || /^called \(.*no answer/.test(l)) return 'na'
   if (/^left voicemail/.test(l) || /left vm/.test(l)) return 'vm'
   if (/^(meeting set|booked in-person meeting)/.test(l)) return 'mset'
   if (/^(meeting held|in-person meeting|zoom bov meeting)/.test(l)) return 'mheld'
+  if (MEET_SET_RE.test(l) && !MEET_NEG_RE.test(l)) return 'mset'   // a call note that mentions booking a meeting
+  if (/\b(met with|meeting held|had (our|the|a) meeting)\b/.test(l) && !/\b(set|book|schedul)/.test(l) && /^(met|had)/.test(l)) return 'mheld'
   if (/^(strategic analysis delivered|sent follow-up email with bov|bov delivered)/.test(l)) return 'bov'
   if (/^(listing signed|exclusive listing signed|exclusive signed)/.test(l)) return 'listing'
   if (/^contract signed/.test(l)) return 'contract'
@@ -2138,23 +2144,47 @@ const KPI_METRICS = [
 function _unusedKpiTargets() { let t = {}; try { t = JSON.parse(localStorage.getItem('kpiTargets') || '{}') } catch { } ; return Object.fromEntries(KPI_METRICS.map(([k, , d]) => [k, t[k] ?? d])) }
 const monday = d => { const x = new Date(d); const w = (x.getDay() + 6) % 7; x.setDate(x.getDate() - w); x.setHours(0, 0, 0, 0); return x }
 async function loadKpiCalls(from) {
-  if (KPI.loading || (KPI.calls && KPI.from && KPI.from <= from)) return
+  if (KPI.loading) return
+  if (KPI.calls && KPI.from && KPI.from <= from) {
+    // already loaded — top up with any dials made since (at most every 20s)
+    if (Date.now() - (KPI.at || 0) < 20000) return
+    KPI.loading = true; KPI.at = Date.now()
+    const { data } = await sb.from('prospect_calls').select('id, prospect_id, outcome, called_at').gt('id', KPI.maxId || 0).order('id').limit(1000)
+    KPI.loading = false
+    if (data?.length) { KPI.calls.push(...data); KPI.maxId = data[data.length - 1].id; if (S.tab === 'kpis') render({ soft: true }) }
+    return
+  }
   KPI.loading = true
   const rows = []
   for (let i = 0; ; i += 1000) {
-    const { data, error } = await sb.from('prospect_calls').select('prospect_id, outcome, called_at').gte('called_at', new Date(from.getTime() - 864e5).toISOString()).order('id').range(i, i + 999)
+    const { data, error } = await sb.from('prospect_calls').select('id, prospect_id, outcome, called_at').gte('called_at', new Date(from.getTime() - 864e5).toISOString()).order('id').range(i, i + 999)
     if (error) { toast(error.message); break }
     rows.push(...data); if (data.length < 1000) break
   }
-  KPI.calls = rows; KPI.from = from; KPI.loading = false
+  KPI.calls = rows; KPI.from = from; KPI.loading = false; KPI.at = Date.now(); KPI.maxId = rows.length ? rows[rows.length - 1].id : 0
   if (S.tab === 'kpis') render({ soft: true })
 }
-const nyDay = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+const _nyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' })
+const nyDay = ts => _nyFmt.format(new Date(ts))
+// Calls and conversations grouped by day once (instead of re-scanning everything for every day on screen)
+let KIDX = null
+function kpiIndex() {
+  const last = S.convos[S.convos.length - 1]
+  const key = `${(KPI.calls || []).length}|${KPI.maxId || 0}|${S.convos.length}|${last?.id || 0}|${S.contacts.length}`
+  if (KIDX && KIDX.key === key) return KIDX
+  const calls = new Map(), convos = new Map(), newc = new Map()
+  for (const c of KPI.calls || []) { const d = c._d || (c._d = nyDay(c.called_at)); (calls.get(d) || calls.set(d, []).get(d)).push(c) }
+  for (const v of S.convos) (convos.get(v.talked_on) || convos.set(v.talked_on, []).get(v.talked_on)).push(v)
+  for (const c of S.contacts) if (c.created_at) { const d = nyDay(c.created_at); newc.set(d, (newc.get(d) || 0) + 1) }
+  KIDX = { key, calls, convos, newc, memo: new Map() }
+  return KIDX
+}
 function kpiDay(day) {
+  const idx = kpiIndex()
+  if (idx.memo.has(day)) return { ...idx.memo.get(day) }
   const m = { texts: 0, textin: 0, total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
   const ppl = new Set()
-  for (const c of KPI.calls || []) {
-    if (nyDay(c.called_at) !== day) continue
+  for (const c of idx.calls.get(day) || []) {
     const o = c.outcome || ''
     if (/^(undo|talked)/i.test(o)) continue // conversions are counted from the contact's conversation
     m.total++ // every dial, bad numbers included — total effort
@@ -2165,9 +2195,9 @@ function kpiDay(day) {
     else if (/^no answer/i.test(o)) m.na++
   }
   const seen = new Set()
-  for (const v of S.convos) {
-    if (v.talked_on !== day) continue
+  for (const v of idx.convos.get(day) || []) {
     const k = convKind(v.notes), key = v.contact_id + '|' + k
+    if (k === 'mset' && isTalkMeeting(v.notes) && !seen.has(v.contact_id + '|talk')) { seen.add(v.contact_id + '|talk'); m.dials++; m.connects++; ppl.add('c' + v.contact_id) }
     if (seen.has(key)) continue; seen.add(key)
     if (['talk', 'na', 'vm', 'dial'].includes(k)) { m.dials++; ppl.add('c' + v.contact_id) }
     if (k === 'talk') m.connects++
@@ -2176,9 +2206,10 @@ function kpiDay(day) {
     else if (k in m) m[k]++
     if (k === 'closed') { const f = String(v.notes).match(/\$\s?([\d,]+(?:\.\d+)?)\s*(k)?/i); if (f) m.income += Number(f[1].replace(/,/g, '')) * (f[2] ? 1000 : 1) }
   }
-  m.newc = S.contacts.filter(c => c.created_at && nyDay(c.created_at) === day).length
+  m.newc = idx.newc.get(day) || 0
   m.people = ppl.size
-  return m
+  idx.memo.set(day, m)
+  return { ...m }
 }
 function kpiSum(days) {
   const t = days.map(kpiDay).reduce((a, m) => { for (const k in m) a[k] = (a[k] || 0) + m[k]; return a }, {})
