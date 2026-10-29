@@ -1736,11 +1736,7 @@ function personBlock(r, b, notes) {
         el('button', { class: 'btn small vmok' + (ph.status === 'Owner VM' ? ' on' : ''), title: 'Left a voicemail and the greeting confirmed it’s the owner — parks this as a good number', onclick: e => { e.target.disabled = true; recordAttempt(r, ph, 'Left voicemail — owner’s number confirmed', 'Owner VM', notes.value.trim()) } }, 'VM ✓ owner’s #'),
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
-        el('button', { class: 'btn small', title: 'Someone answered (office line, receptionist, partner…) but not a lead — log it with a note', onclick: e => {
-          const n = prompt(`Talked on ${ph.phone} — who did you speak with / what did they say?`, '')
-          if (n === null) return
-          e.target.disabled = true; recordAttempt(r, ph, 'Spoke — office line', 'Good', n.trim())
-        } }, 'Spoke (note)'),
+        el('button', { class: 'btn small', title: 'Someone picked up — the owner or someone else. Log it with a note and set a follow-up', onclick: () => openSpoke(r, ph) }, 'Spoke (note)'),
         !['Untested', 'Good', 'Owner VM'].includes(ph.status) ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
@@ -1763,7 +1759,9 @@ function personBlock(r, b, notes) {
         const v = r.priority === p ? null : p
         const { error } = await sb.from('prospects').update({ priority: v, updated_at: nowIso() }).eq('id', r.id)
         if (error) { toast(error.message); return }
-        toast(v ? `${r.owner_name} tagged ${v}` : 'Tag removed'); refreshProspects(); openProspect(r.id)
+        r.priority = v
+        await openProspect(r.id); refreshProspects()
+        toast(v ? `${r.owner_name} tagged ${v}` : 'Tag removed')
       } }, p))),
     phones.length ? phones.map(phoneRow) : el('p', { class: 'muted', style: 'margin:6px 0', text: 'No numbers — skip trace this person.' }),
     r.status === 'Converted' ? null : [
@@ -1779,7 +1777,7 @@ function personBlock(r, b, notes) {
       el('div', { class: 'actions', style: 'margin-top:8px' },
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, null, { meeting: true }) }, '📅 Meeting set'),
         el('button', { class: 'btn small', onclick: () => openConvert(r, null) }, 'Talked (other number)'),
-        el('button', { class: 'btn small', onclick: () => fuBox.classList.toggle('hidden') }, '📅 Follow-up'),
+        el('button', { class: 'btn small', onclick: () => { fuBox.classList.remove('hidden'); fuBox.scrollIntoView({ behavior: 'smooth', block: 'center' }); fuBox.querySelector('input[type=date]')?.focus() } }, '📅 Follow-up'),
         el('button', { class: 'btn small', onclick: () => setProspectStatus(r, 'Not interested', 'Reached — not interested') }, 'Not interested'),
         el('button', { class: 'btn small', onclick: () => setProspectStatus(r, 'Do not call', 'Do not call') }, 'Do not call'),
         el('button', { class: 'btn small ghost', onclick: () => openProspectForm(r) }, 'Edit'),
@@ -1870,36 +1868,9 @@ function openConvert(r, ph, { meeting } = {}) {
     const convNote = meeting ? 'Meeting set for ' + meetWhen() + (notes.value.trim() ? ' — ' + notes.value.trim() : '') : notes.value.trim()
     save.disabled = true
     try {
-      const base = slug(r.owner_name)
-      const { data: taken } = await sb.from('contacts').select('id').like('id', base + '%')
-      const used = new Set((taken || []).map(x => x.id)); let id = base, n = 2
-      while (used.has(id)) id = base + '-' + n++
-      const goodPhone = ph || (r.prospect_phones || []).find(x => !PHONE_BAD.includes(x.status))
-      const aq = r.property_address ? [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ') : null
-      const contact = { id, name: r.owner_name, company: r.company, priority: pri.value, contact_type: type.value, phone: goodPhone?.phone || null, email: r.email,
-        address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id,
-        next_follow_up: meeting ? mDate.value : next.value || null, next_time: meeting ? mTime.value || null : nextTime.value || null,
-        next_note: meeting ? 'MEETING ' + meetWhen() : nextNote.value.trim() || null, last_contact: ymd(T),
-        notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
-      const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
-      // Every building this person owns goes on their one contact card; the one you're discussing moves along the pipeline
-      const { data: blds } = myB.length ? await sb.from('prospect_buildings').select('*').in('id', myB) : { data: [] }
-      let aboutPropId = null
-      for (const bid of myB) {
-        const x = (blds || []).find(d => d.id === bid); if (!x) continue
-        const isAbout = String(bid) === String(about.value)
-        const { data: pr } = await sb.from('properties').insert({ contact_id: id, name: x.property_name || null, address: x.address, address_query: [x.address, x.city, 'FL', x.zip].filter(Boolean).join(', '), city: x.city, county: x.county, lat: x.lat, lng: x.lng,
-          parcel_id: x.parcel_id, product_type: x.product_type, building_sf: x.building_sf, year_built: x.year_built, just_value: x.just_value, owner_of_record: x.owner_of_record, owner_mailing: x.owner_mailing, pa_link: x.pa_link, use_code: x.use_code,
-          stage: isAbout ? (meeting ? 'Meeting' : 'Contacted') : 'Contacted', stage_updated_at: nowIso() }).select('id').single()
-        if (isAbout && pr) aboutPropId = pr.id
-      }
-      if (!myB.length && r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso() })
-      const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: convNote, property_id: aboutPropId }); if (e2) throw e2
-      if (ph) await sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: nowIso() }).eq('id', ph.id)
-      await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: meeting ? `Reached — meeting set → contact (${pri.value})${ph ? ' (' + ph.phone + ')' : ''}` : `Talked → contact (${pri.value})`, notes: convNote })
-      await sb.from('prospects').update({ status: 'Converted', converted_contact_id: id, next_attempt_on: null, last_attempt_at: nowIso(), attempts: (r.attempts || 0) + 1, updated_at: nowIso() }).eq('id', r.id)
-      await Promise.all([loadTable('contacts'), loadTable('conversations'), loadTable('properties')])
-      refreshProspects(); openContact(id); locateMissing(); toast(meeting ? `Meeting set with ${r.owner_name} · ${meetWhen()}` : `${r.owner_name} added to your contacts (${pri.value})`)
+      await convertProspect(r, ph, { meeting, priority: pri.value, type: type.value, convNote, aboutId: about.value, myB,
+        next: meeting ? mDate.value : next.value || null, nextTime: meeting ? mTime.value || null : nextTime.value || null,
+        nextNote: meeting ? 'MEETING ' + meetWhen() : nextNote.value.trim() || null, meetWhen: meeting ? meetWhen() : null })
     } catch (x) { err.textContent = x.message || String(x); save.disabled = false }
   } },
     el('h2', { text: (meeting ? '📅 Meeting set with ' : 'Talked to ') + r.owner_name }),
@@ -1911,6 +1882,111 @@ function openConvert(r, ph, { meeting } = {}) {
     meeting ? null : [el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Next follow-up', next), el('label', { class: 'f' }, 'Time (blank = first call block)', nextTime)),
       el('label', { class: 'f' }, 'Next step', nextNote)],
     err, el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => openProspect(r.id) }, 'Cancel')))
+  DRAWER.kind = null
+  showDrawer(form)
+  notes.focus()
+}
+// Buildings a prospect is tied to — the one on screen first
+function personBuildings(r) {
+  return [BCTX.b && bPeople(BCTX.b).some(x => x.id === r.id) ? BCTX.id : null, ...(r.prospect_building_people || []).map(x => x.building_id)].filter((v, i, a) => v && a.indexOf(v) === i)
+}
+// Turn a prospect into a contact: one card, every building they own on it, the conversation logged, follow-up set
+async function convertProspect(r, ph, { meeting, priority, type = 'Seller', convNote, aboutId, myB, next, nextTime, nextNote, meetWhen }) {
+  const T = today()
+  myB = myB || personBuildings(r)
+  aboutId = aboutId || myB[0]
+  const base = slug(r.owner_name)
+  const { data: taken } = await sb.from('contacts').select('id').like('id', base + '%')
+  const used = new Set((taken || []).map(x => x.id)); let id = base, n = 2
+  while (used.has(id)) id = base + '-' + n++
+  const goodPhone = ph || (r.prospect_phones || []).find(x => !PHONE_BAD.includes(x.status))
+  const aq = r.property_address ? [r.property_address, r.city, 'FL', r.zip].filter(Boolean).join(', ') : null
+  const contact = { id, name: r.owner_name, company: r.company, priority, contact_type: type, phone: goodPhone?.phone || null, email: r.email,
+    address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id,
+    next_follow_up: next || null, next_time: nextTime || null, next_note: nextNote || null, last_contact: ymd(T),
+    notes: [r.mailing_address ? 'Mailing: ' + [r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip].filter(Boolean).join(', ') : null, r.notes, 'Converted from prospect list' + (r.source ? ` (${r.source})` : '')].filter(Boolean).join('\n') }
+  const { error: e1 } = await sb.from('contacts').insert(contact); if (e1) throw e1
+  // Every building this person owns goes on their one contact card; the one you're discussing moves along the pipeline
+  const { data: blds } = myB.length ? await sb.from('prospect_buildings').select('*').in('id', myB) : { data: [] }
+  let aboutPropId = null
+  for (const bid of myB) {
+    const x = (blds || []).find(d => d.id === bid); if (!x) continue
+    const isAbout = String(bid) === String(aboutId)
+    const { data: pr } = await sb.from('properties').insert({ contact_id: id, name: x.property_name || null, address: x.address, address_query: [x.address, x.city, 'FL', x.zip].filter(Boolean).join(', '), city: x.city, county: x.county, lat: x.lat, lng: x.lng,
+      parcel_id: x.parcel_id, product_type: x.product_type, building_sf: x.building_sf, year_built: x.year_built, just_value: x.just_value, owner_of_record: x.owner_of_record, owner_mailing: x.owner_mailing, pa_link: x.pa_link, use_code: x.use_code,
+      stage: isAbout ? (meeting ? 'Meeting' : 'Contacted') : 'Contacted', stage_updated_at: nowIso() }).select('id').single()
+    if (isAbout && pr) aboutPropId = pr.id
+  }
+  if (!myB.length && r.property_address) await sb.from('properties').insert({ contact_id: id, address: r.property_address, address_query: aq, city: r.city, county: r.county, lat: r.lat, lng: r.lng, parcel_id: r.parcel_id, product_type: r.product_type, building_sf: r.building_sf, year_built: r.year_built, stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso() })
+  const { error: e2 } = await sb.from('conversations').insert({ contact_id: id, talked_on: ymd(T), notes: convNote, property_id: aboutPropId }); if (e2) throw e2
+  if (ph) await sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: nowIso() }).eq('id', ph.id)
+  await sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: meeting ? `Reached — meeting set → contact (${priority})${ph ? ' (' + ph.phone + ')' : ''}` : `Talked → contact (${priority})${ph ? ' (' + ph.phone + ')' : ''}`, notes: convNote })
+  await sb.from('prospects').update({ status: 'Converted', converted_contact_id: id, next_attempt_on: null, callback_time: null, callback_note: null, last_attempt_at: nowIso(), attempts: (r.attempts || 0) + 1, updated_at: nowIso() }).eq('id', r.id)
+  await Promise.all([loadTable('contacts'), loadTable('conversations'), loadTable('properties')])
+  refreshProspects(); openContact(id); locateMissing()
+  toast(meeting ? `Meeting set with ${r.owner_name} · ${meetWhen}` : `${r.owner_name} added to your contacts (${priority})${next ? ' · follow up ' + fmt(next, { weekday: 'short', month: 'short', day: 'numeric' }) : ''}`)
+  return id
+}
+
+/* "Spoke" on a number — owner (→ contact with a follow-up) or someone else (stays a prospect, optional follow-up). Never skips you to the next building. */
+function openSpoke(r, ph) {
+  const T = today()
+  let who = 'owner'
+  const defPri = r.priority || 'B'
+  const notes = el('textarea', { rows: 4, placeholder: 'What did they say?', value: (BCTX.note && BCTX.note.value.trim()) || '' })
+  const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: p === defPri })))
+  const date = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
+  const time = el('input', { type: 'time', value: '' })
+  const step = el('input', { placeholder: 'Next step — e.g. send comps, call back Wednesday' })
+  const myB = personBuildings(r)
+  const about = el('select', null, myB.map((bid, i) => el('option', { value: bid, text: bid === BCTX.id && BCTX.b ? bTitle(BCTX.b) : `Building #${i + 1}`, selected: i === 0 })))
+  if (myB.length > 1) sb.from('prospect_buildings').select('id,address,property_name,city').in('id', myB).then(({ data }) => { for (const o of about.options) { const x = (data || []).find(d => String(d.id) === o.value); if (x) o.textContent = [bTitle(x), x.city].filter(Boolean).join(', ') } })
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary', type: 'submit' })
+  const ownerOnly = el('div', { class: 'stack' }, el('label', { class: 'f' }, 'Tag', pri), myB.length > 1 ? el('label', { class: 'f' }, 'Talked about', about) : null)
+  const hint = el('p', { class: 'muted', style: 'font-size:12.5px;margin:0' })
+  const whoBtns = [['owner', 'The owner / decision maker'], ['other', 'Someone else (office, tenant, assistant)']].map(([k, label]) =>
+    el('button', { type: 'button', class: 'chip', onclick: () => { who = k; sync() } }, label))
+  const sync = () => {
+    whoBtns[0].classList.toggle('on', who === 'owner'); whoBtns[1].classList.toggle('on', who === 'other')
+    ownerOnly.classList.toggle('hidden', who !== 'owner')
+    save.textContent = who === 'owner' ? 'Save — add to contacts' : 'Save — keep as prospect'
+    hint.textContent = who === 'owner' ? 'They become a contact with this tag and follow-up (on your calendar). All of their buildings go on the card.' : 'Logs the call, marks this number good, and they come back up on your follow-up date. You stay on this building.'
+  }
+  sync()
+  const form = el('form', { class: 'stack', onsubmit: async e => {
+    e.preventDefault(); err.textContent = ''
+    const note = notes.value.trim()
+    if (!note) { err.textContent = 'Add a quick note about the call.'; return }
+    if (who === 'owner' && !date.value) { err.textContent = 'Pick a follow-up date.'; return }
+    save.disabled = true
+    try {
+      if (who === 'owner') {
+        await convertProspect(r, ph, { priority: pri.value, convNote: note, aboutId: about.value, myB, next: date.value, nextTime: time.value || null, nextNote: step.value.trim() || 'Follow up' })
+        return
+      }
+      const now = nowIso()
+      const patch = { status: 'Attempted', attempts: (r.attempts || 0) + 1, last_attempt_at: now, updated_at: now,
+        next_attempt_on: date.value || ymd(addBusinessDays(T, 1)), callback_time: date.value ? time.value || null : null, callback_note: date.value ? step.value.trim() || 'Follow up' : null }
+      const res = await Promise.all([
+        ph ? sb.from('prospect_phones').update({ status: 'Good', attempts: (ph.attempts || 0) + 1, last_called_at: now }).eq('id', ph.id) : Promise.resolve({}),
+        sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph?.id || null, outcome: `Spoke — not the owner${ph ? ' (' + ph.phone + ')' : ''}`, notes: note }),
+        sb.from('prospects').update(patch).eq('id', r.id)])
+      const bad = res.find(x => x.error); if (bad) throw bad.error
+      if (BCTX.note) BCTX.note.value = ''
+      await openProspect(r.id); refreshProspects()
+      toast(`Logged · back up ${fmt(patch.next_attempt_on, { weekday: 'short', month: 'short', day: 'numeric' })}`)
+    } catch (x) { err.textContent = x.message || String(x); save.disabled = false }
+  } },
+    el('h2', { text: `Spoke on ${ph ? ph.phone : 'another number'}` }),
+    el('p', { class: 'muted', text: r.owner_name + (BCTX.b ? ' · ' + bTitle(BCTX.b) : '') }),
+    el('div', { class: 'f' }, 'Who did you talk to?', el('div', { class: 'actions', style: 'margin-top:4px' }, whoBtns)),
+    el('label', { class: 'f' }, 'Notes', notes),
+    ownerOnly,
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Follow up on', date), el('label', { class: 'f' }, 'Time (optional)', time)),
+    el('label', { class: 'f' }, 'Next step', step),
+    hint, err,
+    el('div', { class: 'actions' }, save, el('button', { class: 'btn', type: 'button', onclick: () => openProspect(r.id) }, 'Cancel')))
   DRAWER.kind = null
   showDrawer(form)
   notes.focus()
@@ -2545,8 +2621,8 @@ function prospectFollowUp(r) {
     if (['New', 'Bad data'].includes(r.status)) patch.status = 'Attempted'
     const { error } = await sb.from('prospects').update(patch).eq('id', r.id)
     if (error) { err.textContent = error.message; save.disabled = false; return }
+    await openProspect(r.id); refreshProspects()
     toast(`Follow-up set for ${fmt(date.value, { weekday: 'short', month: 'short', day: 'numeric' })}${time.value ? ' at ' + fmtTime(time.value) : ''}`)
-    refreshProspects(); openProspect(r.id)
   }
   const clear = has ? el('button', { class: 'btn small ghost', type: 'button', onclick: async e => {
     e.currentTarget.disabled = true
