@@ -423,6 +423,38 @@ function propFacts(p) {
   return [p.product_type, p.building_sf ? num(p.building_sf) + ' SF' : null, p.year_built ? 'built ' + p.year_built : null,
     p.asking_price ? 'ask ' + moneyShort(p.asking_price) : p.est_value ? 'est ' + moneyShort(p.est_value) : null].filter(Boolean).join(' · ')
 }
+/* Property appraiser link for any property — saved link, else built from county + parcel, else that county's appraiser search */
+const PA_HOME = {
+  Sarasota: 'https://www.sc-pa.com/propertysearch', Manatee: 'https://www.manateepao.gov/search/', Pinellas: 'https://www.pcpao.gov/quick-search',
+  Hillsborough: 'https://gis.hcpafl.org/propertysearch/', Pasco: 'https://search.pascopa.com/', Hernando: 'https://www.hernandopa-fl.us/',
+  Charlotte: 'https://www.ccappraiser.com/', Polk: 'https://www.polkflpa.gov/', Lee: 'https://www.leepa.org/', Leon: 'https://www.leonpa.gov/',
+  Collier: 'https://www.collierappraiser.com/', Citrus: 'https://www.citruspa.org/', DeSoto: 'https://www.desotopa.com/', Orange: 'https://ocpaweb.ocpafl.org/',
+}
+const paCounty = x => { const c = countyOf(x); return c ? String(c).replace(/\s*county$/i, '').trim() : null }
+function paLinkFor(x) {
+  if (!x) return null
+  if (x.pa_link) return { url: x.pa_link.replace(/^http:/, 'https:'), exact: true }
+  const county = paCounty(x), raw = String(x.parcel_id || '').trim(), d = raw.replace(/\D/g, '')
+  if (raw && county === 'Sarasota' && d.length >= 9) return { url: 'https://www.sc-pa.com/propertysearch/parcel/details/' + d, exact: true }
+  if (raw && county === 'Manatee' && d.length >= 7) return { url: 'https://www.manateepao.gov/parcel/?parid=' + d, exact: true }
+  if (raw && county === 'Pinellas') {
+    const pt = raw.split('-')
+    const strap = pt.length === 6 ? pt[2] + pt[1] + pt[0] + pt[3] + pt[4] + pt[5] : d
+    if (strap.length === 18) return { url: 'https://www.pcpao.gov/property-details?s=' + strap, exact: true }
+  }
+  if (raw && county === 'Pasco' && d.length >= 15) return { url: 'https://search.pascopa.com/parcel.aspx?parcel=' + raw.replace(/[^0-9A-Za-z]/g, ''), exact: true }
+  if (raw && county === 'Hillsborough' && /^[0-9A-Z]{20,}$/.test(raw)) return { url: 'https://gis.hcpafl.org/propertysearch/#/parcel/basic/' + raw, exact: true }
+  return county && PA_HOME[county] ? { url: PA_HOME[county], exact: false, county } : null
+}
+// A button: exact record when we know the parcel, otherwise the county's search page (address copied so you can paste it)
+function paButton(x, { cls = 'btn small', label } = {}) {
+  const pa = paLinkFor(x); if (!pa) return null
+  const addr = [x.address, x.city].filter(Boolean).join(', ')
+  return el('a', { class: cls, href: pa.url, target: '_blank', rel: 'noopener',
+    title: pa.exact ? 'Open the county property appraiser record' : `Opens the ${pa.county} County appraiser search — the address is copied, just paste it`,
+    onclick: e => { e.stopPropagation(); if (!pa.exact && addr) { try { navigator.clipboard.writeText(x.address || addr); toast('Address copied — paste it into the appraiser search') } catch { } } } },
+    label || (pa.exact ? '🏛 Property appraiser' : `🏛 ${pa.county} appraiser search`))
+}
 function propRow(p) {
   const c = contactById(p.contact_id)
   return el('li', { class: 'item', onclick: () => openProperty(p.id) },
@@ -430,6 +462,7 @@ function propRow(p) {
     el('div', { class: 'who' },
       el('div', { class: 'name' }, propTitle(p), el('span', { class: 'stage-tag s' + STAGES.indexOf(p.stage), text: p.stage }), matchBadge(p)),
       el('div', { class: 'sub', text: [c ? c.name : p.owner_of_record, propFacts(p)].filter(Boolean).join(' · ') || '—' })),
+    paButton(p, { cls: 'btn small ghost pa-btn', label: '🏛' }),
     c?.next_follow_up ? el('div', { class: 'when', text: 'Call ' + fmt(c.next_follow_up) }) : null)
 }
 async function setStage(p, stage) {
@@ -1157,11 +1190,12 @@ function propertyDetail(p) {
       el('dt', { text: 'Owner of record' }), el('dd', { text: p.owner_of_record || '—' }),
       p.owner_mailing ? [el('dt', { text: 'Mailing' }), el('dd', { text: p.owner_mailing })] : null,
       el('dt', { text: 'Parcel ID' }), el('dd', { text: p.parcel_id || '—' }),
+      el('dt', { text: 'Appraiser' }), el('dd', null, paButton(p) || el('span', { class: 'muted', text: 'Add the county or parcel ID to link it' })),
       el('dt', { text: 'Notes' }), el('dd', { style: 'white-space:pre-wrap', text: p.notes || '—' })),
     p.parcel_checked_at && !p.parcel_id ? el('p', { class: 'muted', style: 'font-size:13px', text: 'Couldn’t match this address to a parcel automatically. Use “Move pin” to click the right building, and the facts fill in.' }) : null,
     buyerMatchSection(p),
     nearbySection(p),
-    docsSection(p, 'properties', p.pa_link ? [{ title: 'Property appraiser record', url: p.pa_link, auto: true }] : []),
+    docsSection(p, 'properties', paLinkFor(p)?.exact ? [{ title: 'Property appraiser record', url: paLinkFor(p).url, auto: true }] : []),
     el('div', { class: 'actions' },
       el('button', { class: 'btn primary', onclick: () => openPropertyForm(p) }, 'Edit'),
       p.lat != null ? el('button', { class: 'btn', onclick: () => { closeDrawer(); go('map'); MAP.map.setView([p.lat, p.lng], 18) } }, 'Show on map') : null,
@@ -1625,7 +1659,8 @@ function prospectsView() {
               b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
               : due && b.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
             P.q.trim() && !phoneQuery(P.q.trim()) ? (() => { const ws = P.q.trim().toLowerCase().split(/\s+/); const hit = String(b.names || '').split(' · ').find(n => ws.every(w => n.toLowerCase().includes(w))); return hit ? el('div', { class: 'sub', style: 'font-weight:600', text: '👤 ' + hit }) : !String(b.search_text || '').includes(ws[0]) || !ws.every(w => String(b.search_text || '').includes(w)) ? el('div', { class: 'sub', text: '👤 match is someone hidden in the cleanup — open the card → Show removed' }) : null })() : null,
-            el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })))
+            el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })),
+          paButton(b, { cls: 'btn small ghost pa-btn', label: '🏛' }))
       })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No buildings match.' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
       el('button', { class: 'btn small', disabled: P.page === 0, onclick: () => { P.page--; refreshProspects() } }, '‹ Prev'),
@@ -1684,7 +1719,7 @@ function buildingDetail(b) {
     el('div', { class: 'dhead' }, el('span', { class: 'bicon', text: '🏢' }), el('h2', { text: bTitle(b) })),
     el('div', { class: 'actions', style: 'margin-top:6px' },
       el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: [b.property_name ? b.address : null, b.city, b.county ? b.county + ' County' : null].filter(Boolean).join(' · ') || addr }),
-      b.pa_link ? el('a', { class: 'btn small ghost', href: b.pa_link, target: '_blank', rel: 'noopener' }, 'County record ↗') : null),
+      paButton(b, { cls: 'btn small' })),
     el('dl', { class: 'facts' },
       (b.product_type || b.use_desc || b.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [b.product_type || (b.use_desc ? b.use_desc.toLowerCase() : null), b.building_sf ? num(b.building_sf) + ' SF' : null, b.year_built ? 'built ' + b.year_built : null].filter(Boolean).join(' · ') })] : null,
       [el('dt', { text: 'County owner' }), el('dd', { text: b.owner_of_record || '—' })],
