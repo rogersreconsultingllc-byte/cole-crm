@@ -1594,9 +1594,10 @@ async function loadProspects() {
     else if (P.status === 'converted') q = q.eq('any_converted', true)
     else if (P.status === 'bad') q = q.eq('callable', 0).eq('all_bad', true)
   }
-  if (P.status === 'tocall') q = q.order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
-  else if (P.status === 'later' || P.status === 'ownervm') q = q.order('next_due').order('address')
-  else if (P.status === 'never') q = q.order('best_rank').order('address')
+  // Owners with numbers to dial first; buildings with no live numbers sink to the bottom
+  if (P.status === 'tocall') q = q.order('no_live').order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
+  else if (P.status === 'later' || P.status === 'ownervm') q = q.order('no_live').order('next_due').order('address')
+  else if (P.status === 'never') q = q.order('no_live').order('best_rank').order('address')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
   else q = q.order('updated_at', { ascending: false })
   q = q.range(P.page * P_PAGE, P.page * P_PAGE + P_PAGE - 1)
@@ -1708,7 +1709,8 @@ function buildingDetail(b) {
   const all = bPeople(b)
   // Hidden here: removed people, and anyone verified on another building but not on this one's LLC/county records
   const offHere = r => r.verified === 'Not on LLC/county' && r.status !== 'Converted' && (r.prospect_building_people || []).some(x => x.building_id !== b.id && ['County owner', 'LLC manager'].includes(x.verified))
-  const people = all.filter(r => r.status !== 'Removed' && !offHere(r)).sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
+  const hasLive = r => (r.prospect_phones || []).some(ph => !PHONE_BAD.includes(ph.status))
+  const people = all.filter(r => r.status !== 'Removed' && !offHere(r)).sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (hasLive(x) ? 0 : 1) - (hasLive(y) ? 0 : 1) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
   const removed = all.filter(r => r.status === 'Removed' || offHere(r))
   const addr = [b.address, b.city, 'FL', b.zip].filter(Boolean).join(', ')
   const notes = el('textarea', { rows: 2, placeholder: 'Optional note for this attempt' })
