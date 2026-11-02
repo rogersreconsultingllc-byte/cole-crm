@@ -1774,7 +1774,7 @@ function personBlock(r, b, notes) {
         act('Wrong #', 'Wrong number', 'Wrong number'), act('Disconnected', 'Disconnected', 'Disconnected'),
         act('DNC', 'Asked not to be called', 'Do not call'),
         el('button', { class: 'btn small', title: 'Someone picked up — the owner or someone else. Log it with a note and set a follow-up', onclick: () => openSpoke(r, ph) }, 'Spoke (note)'),
-        !['Untested', 'Good', 'Owner VM'].includes(ph.status) ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Put this number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
+        ph.status !== 'Untested' || (r.prospect_calls || []).some(c => c.phone_id === ph.id) ? el('button', { class: 'btn small ghost', title: 'Tapped the wrong button? Removes that last dial from your log and KPIs and puts the number back', onclick: e => { e.target.disabled = true; resetPhone(r, ph) } }, '↺ Undo') : null,
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph) }, 'Talked ✓'),
         el('button', { class: 'btn small primary', onclick: () => openConvert(r, ph, { meeting: true }) }, '📅 Meeting set')))
   }
@@ -1853,15 +1853,22 @@ async function goNextProspect(r, msg) {
   if (next) { toast((msg ? msg + ' · ' : '') + `Next: ${bTitle(next)}`); openBuilding(next.id) }
   else { toast((msg ? msg + ' · ' : '') + 'That was the last building on this page'); closeDrawer() }
 }
+// Undo the last tap on a number: deletes that dial from the log (so KPIs drop it) and puts the number back the way it was
+const OUTCOME_STATUS = [[/^No answer/, 'No answer'], [/^Left voicemail — owner/, 'Owner VM'], [/^Left voicemail/, 'Voicemail'], [/^Wrong number/, 'Wrong number'], [/^Disconnected/, 'Disconnected'], [/^Asked not to be called/, 'Do not call'], [/^(Spoke|Reached|Talked)/, 'Good']]
 async function resetPhone(r, ph) {
   const now = nowIso()
+  const mine = (r.prospect_calls || []).filter(c => c.phone_id === ph.id && !/^Undo/.test(c.outcome || '')).sort((a, c) => String(c.called_at).localeCompare(String(a.called_at)))
+  const last = mine[0], prev = mine[1]
+  const back = prev ? (OUTCOME_STATUS.find(([re]) => re.test(prev.outcome || ''))?.[1] || 'Untested') : 'Untested'
   const res = await Promise.all([
-    sb.from('prospect_phones').update({ status: 'Untested', attempts: Math.max(0, (ph.attempts || 1) - 1) }).eq('id', ph.id),
-    sb.from('prospect_calls').insert({ prospect_id: r.id, phone_id: ph.id, outcome: `Undo — ${ph.phone} put back (was ${ph.status})` }),
-    ['Bad data', 'Do not call'].includes(r.status) ? sb.from('prospects').update({ status: r.attempts ? 'Attempted' : 'New', next_attempt_on: ymd(today()), updated_at: now }).eq('id', r.id) : Promise.resolve({}),
+    last ? sb.from('prospect_calls').delete().eq('id', last.id) : Promise.resolve({}),
+    sb.from('prospect_phones').update({ status: back, attempts: Math.max(0, (ph.attempts || 1) - 1), last_called_at: prev ? prev.called_at : null }).eq('id', ph.id),
+    sb.from('prospects').update({ attempts: Math.max(0, (r.attempts || 1) - (last ? 1 : 0)), status: ['Bad data', 'Do not call'].includes(r.status) || !r.attempts ? (r.attempts > 1 ? 'Attempted' : 'New') : r.status, next_attempt_on: ymd(today()), updated_at: now }).eq('id', r.id),
   ])
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
-  toast(`${ph.phone} is back in play`); refreshProspects(); openProspect(r.id)
+  if (last && KPI.calls) KPI.calls = KPI.calls.filter(c => c.id !== last.id)
+  toast(last ? `Undone — “${String(last.outcome).replace(/ \(.*\)$/, '')}” removed from your log and KPIs · ${ph.phone} is ${back}` : `${ph.phone} is back in play`)
+  await openProspect(r.id); refreshProspects()
 }
 async function setProspectStatus(r, status, outcome) {
   const now = nowIso()
