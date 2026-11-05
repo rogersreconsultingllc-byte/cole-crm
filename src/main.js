@@ -1710,7 +1710,9 @@ function buildingDetail(b) {
   // Hidden here: removed people, and anyone verified on another building but not on this one's LLC/county records
   const offHere = r => r.verified === 'Not on LLC/county' && r.status !== 'Converted' && (r.prospect_building_people || []).some(x => x.building_id !== b.id && ['County owner', 'LLC manager'].includes(x.verified))
   const hasLive = r => (r.prospect_phones || []).some(ph => !PHONE_BAD.includes(ph.status))
-  const people = all.filter(r => r.status !== 'Removed' && !offHere(r)).sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (hasLive(x) ? 0 : 1) - (hasLive(y) ? 0 : 1) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
+  // Owners whose numbers have all been dialed today drop below the ones you still need to call
+  const doneToday = r => !['New', 'Attempted'].includes(r.status) || !(r.prospect_phones || []).some(ph => !PHONE_BAD.includes(ph.status) && !calledToday(ph))
+  const people = all.filter(r => r.status !== 'Removed' && !offHere(r)).sort((x, y) => (x.status === 'Converted' ? -1 : 0) - (y.status === 'Converted' ? -1 : 0) || (hasLive(x) ? 0 : 1) - (hasLive(y) ? 0 : 1) || (doneToday(x) ? 1 : 0) - (doneToday(y) ? 1 : 0) || (VER_ORDER[x.verified] ?? 2) - (VER_ORDER[y.verified] ?? 2) || (x.own_rank ?? 2) - (y.own_rank ?? 2) || String(x.owner_name).localeCompare(String(y.owner_name)))
   const removed = all.filter(r => r.status === 'Removed' || offHere(r))
   const addr = [b.address, b.city, 'FL', b.zip].filter(Boolean).join(', ')
   const notes = el('textarea', { rows: 2, placeholder: 'Optional note for this attempt' })
@@ -1752,8 +1754,10 @@ function buildingDetail(b) {
       el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' · ' + c.who }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
 }
 // One owner/manager on a building: their name, how they check out, and their numbers right underneath
+const calledToday = ph => !!ph.last_called_at && ymd(new Date(ph.last_called_at)) === ymd(today())
 function personBlock(r, b, notes) {
-  const phones = [...(r.prospect_phones || [])].sort((a, c) => phoneRank(a.status) - phoneRank(c.status))
+  // Numbers still to dial today first; ones you already called today sink below them
+  const phones = [...(r.prospect_phones || [])].sort((a, c) => (calledToday(a) ? 1 : 0) - (calledToday(c) ? 1 : 0) || phoneRank(a.status) - phoneRank(c.status))
   const newPhone = el('input', { type: 'tel', placeholder: 'Add a number' })
   const others = (r.prospect_building_people || []).filter(x => x.building_id !== b.id).length
   const fuBox = prospectFollowUp(r)
@@ -1842,7 +1846,11 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
   const others = BCTX.b ? bPeople(BCTX.b).filter(x => x.id !== r.id && ['New', 'Attempted'].includes(x.status)) : []
   const cardDone = phones.every(tried) && others.every(o => (o.prospect_phones || []).every(tried))
   if (cardDone) return goNextProspect(r, msg)
-  toast(msg); refreshProspects(); openProspect(r.id)
+  const personDone = phones.every(tried)
+  const nextUp = personDone ? others.find(o => (o.prospect_phones || []).some(x => !tried(x))) : null
+  toast(nextUp ? `${msg} · next up: ${nextUp.owner_name}` : msg); refreshProspects()
+  await openProspect(r.id)
+  if (nextUp) document.querySelector('.drawer .person:not(.converted)')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 // Open the building that comes after the current one in the list (captured before the list refreshes)
 async function goNextProspect(r, msg) {
