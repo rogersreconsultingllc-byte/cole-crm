@@ -95,6 +95,7 @@ const fmtTime = t => { if (!t) return ''; const [h, m] = String(t).split(':').ma
 const byWhen = (a, b) => (a.next_follow_up || '9999').localeCompare(b.next_follow_up || '9999') || (a.next_time || '99').localeCompare(b.next_time || '99') || (a.priority || 'C').localeCompare(b.priority || 'C')
 
 function toast(msg) {
+  document.querySelectorAll('.toast').forEach(n => n.remove()) // newest message replaces the last so they never stack
   const t = el('div', { class: 'toast', text: msg }); document.body.append(t)
   setTimeout(() => t.remove(), 2600)
 }
@@ -276,11 +277,11 @@ function render({ soft } = {}) {
 function go(tab) { S.tab = tab; localStorage.setItem('tab', tab); render() }
 
 /* ---------- Today ---------- */
-function contactRow(c, { showDate = true } = {}) {
+function contactRow(c, { showDate = true, queue = null } = {}) {
   const T = today(), d = parse(c.next_follow_up)
   const late = d && d < T ? daysBetween(d, T) : 0
   const tel = telHref(c.phone)
-  return el('li', { class: 'item', onclick: () => openContact(c.id) },
+  return el('li', { class: 'item' + (QUEUE.done.has(c.id) && queue ? ' done' : ''), onclick: () => queue ? startQueue(queue, c.id) : openContact(c.id) },
     el('span', { class: 'pri ' + (c.priority || 'C'), text: c.priority || 'C' }),
     el('div', { class: 'who' },
       el('div', { class: 'name' }, c.name, c.contact_type && c.contact_type !== 'Seller' ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,
@@ -297,17 +298,20 @@ function todayView() {
   const week = withDate.filter(c => c.next_follow_up > Ts && c.next_follow_up <= Ws)
   const recent = [...S.convos].sort((a, b) => String(b.talked_on).localeCompare(String(a.talked_on)) || b.id - a.id).slice(0, 6)
   const active = S.props.filter(p => ['Meeting', 'BOV', 'Listing', 'Under contract'].includes(p.stage))
-  const block = (title, arr, empty) => [el('div', { class: 'section-title', text: `${title} (${arr.length})` }),
-    el('div', { class: 'card' }, arr.length ? el('ul', { class: 'list' }, arr.map(c => contactRow(c))) : el('div', { class: 'empty', text: empty }))]
+  // Opening a card from Overdue/Today walks through all of today's calls in order; Next 7 days walks that list
+  const dueIds = [...overdue, ...due].map(c => c.id), weekIds = week.map(c => c.id)
+  const block = (title, arr, empty, queue) => [el('div', { class: 'section-title', text: `${title} (${arr.length})` }),
+    el('div', { class: 'card' }, arr.length ? el('ul', { class: 'list' }, arr.map(c => contactRow(c, { queue }))) : el('div', { class: 'empty', text: empty }))]
   return el('div', null,
     el('div', { class: 'head' }, el('div', null,
       el('h1', { text: T.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) }),
       el('p', { class: 'muted', text: overdue.length + due.length ? `${overdue.length + due.length} call${overdue.length + due.length === 1 ? '' : 's'} to make today` : 'No calls due today' }))),
     el('div', { class: 'stats' },
       stat(due.length, 'Due today'), stat(overdue.length, 'Overdue'), stat(week.length, 'Next 7 days'), stat(active.length, 'Active deals', () => go('pipeline'))),
-    overdue.length ? block('Overdue', overdue, '') : null,
-    block('Today', due, 'Nothing scheduled for today.'),
-    block('Next 7 days', week, 'Nothing in the next week.'),
+    dueIds.length ? el('button', { class: 'btn primary', style: 'margin-top:14px', onclick: () => startQueue(dueIds, dueIds.find(id => !QUEUE.done.has(id)) || dueIds[0]) }, `▶ Start calling (${dueIds.length})`) : null,
+    overdue.length ? block('Overdue', overdue, '', dueIds) : null,
+    block('Today', due, 'Nothing scheduled for today.', dueIds),
+    block('Next 7 days', week, 'Nothing in the next week.', weekIds),
     active.length ? [el('div', { class: 'section-title', text: `Active deals (${active.length})` }),
       el('div', { class: 'card' }, el('ul', { class: 'list' }, active.map(propRow)))] : null,
     el('div', { class: 'section-title', text: 'Recent conversations' }),
@@ -987,7 +991,36 @@ function showDrawer(content) {
   return d
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer() })
-function openContact(id) { DRAWER.kind = 'contact'; DRAWER.id = id; MAP.map?.closePopup(); refreshDrawer(true) }
+// Call queue: a snapshot of the list Cole opened a card from, so logging an outcome moves straight to the next person
+const QUEUE = { ids: [], done: new Set(), day: '' }
+function startQueue(ids, id) {
+  const T = ymd(today()); if (QUEUE.day !== T) { QUEUE.done = new Set(); QUEUE.day = T }
+  QUEUE.ids = [...ids]; DRAWER.kind = 'contact'; DRAWER.id = id; MAP.map?.closePopup(); refreshDrawer(true)
+}
+function openContact(id) { if (!QUEUE.ids.includes(id)) QUEUE.ids = []; DRAWER.kind = 'contact'; DRAWER.id = id; MAP.map?.closePopup(); refreshDrawer(true) }
+const inQueue = id => QUEUE.ids.includes(id)
+// Move to the next person in the queue who hasn't been handled yet; returns false when there isn't one
+function nextInQueue(fromId, { markDone = true } = {}) {
+  if (!inQueue(fromId)) return false
+  if (markDone) QUEUE.done.add(fromId)
+  const i = QUEUE.ids.indexOf(fromId)
+  const rest = [...QUEUE.ids.slice(i + 1), ...QUEUE.ids.slice(0, i)].filter(id => !QUEUE.done.has(id) && contactById(id))
+  if (!rest.length) { QUEUE.ids = []; closeDrawer(); toast(markDone ? 'That’s everyone on the list — nice work' : 'No one left on the list'); render({ soft: true }); return true }
+  DRAWER.id = rest[0]; refreshDrawer(true); return true
+}
+function prevInQueue(fromId) {
+  const i = QUEUE.ids.indexOf(fromId); if (i <= 0) return
+  DRAWER.id = QUEUE.ids[i - 1]; refreshDrawer(true)
+}
+function queueBar(c) {
+  if (!inQueue(c.id)) return null
+  const i = QUEUE.ids.indexOf(c.id), left = QUEUE.ids.filter(id => !QUEUE.done.has(id) && id !== c.id).length
+  return el('div', { class: 'queuebar' },
+    el('span', null, el('b', { text: `Call ${i + 1} of ${QUEUE.ids.length}` }), el('span', { class: 'muted', text: ` · ${left} left after this` })),
+    el('span', { class: 'actions', style: 'margin:0;gap:6px' },
+      i > 0 ? el('button', { class: 'btn small ghost', onclick: () => prevInQueue(c.id) }, '← Back') : null,
+      el('button', { class: 'btn small', title: 'Skip without logging anything', onclick: () => nextInQueue(c.id, { markDone: false }) }, 'Skip →')))
+}
 function openProperty(id) { DRAWER.kind = 'property'; DRAWER.id = id; MAP.map?.closePopup(); refreshDrawer(true) }
 function refreshDrawer(fresh) {
   const obj = DRAWER.kind === 'contact' ? contactById(DRAWER.id) : DRAWER.kind === 'property' ? propById(DRAWER.id) : null
@@ -1031,7 +1064,7 @@ function outcomeBar(c, notesField) {
       const ph = callingFor(c)
       await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting, propertyId: opts.propertyId, phoneStatus: opts.phoneStatus })
       toast(`${label} logged${isOtherPerson(c, ph) ? ' for ' + ph.person_name : ''} · next call ${fmt(ymd(opts.next), { weekday: 'short', month: 'short', day: 'numeric' })}`)
-      render({ soft: true }); refreshDrawer(true)
+      render({ soft: true }); if (!nextInQueue(c.id)) refreshDrawer(true)
     } catch (x) { toast('Couldn’t save: ' + (x.message || x)); btn.disabled = false }
   }
   const meetBox = el('div', { class: 'meetbox hidden' })
@@ -1083,10 +1116,11 @@ function contactDetail(c) {
     save.disabled = true; logErr.textContent = ''
     try {
       await logCall(c, { note: notes.value.trim(), talked: talked.value, priority: pri.value, next: nextDate.value, nextTime: nextTime.value, nextNote: nextStep.value.trim(), phoneStatus: 'Good' })
-      toast('Conversation saved'); render({ soft: true }); refreshDrawer(true)
+      toast('Conversation saved'); render({ soft: true }); if (!nextInQueue(c.id)) refreshDrawer(true)
     } catch (x) { logErr.textContent = 'Couldn’t save: ' + (x.message || x); save.disabled = false }
   }
   return el('div', null,
+    queueBar(c),
     el('div', { class: 'dhead' }, el('span', { class: 'pri ' + (c.priority || 'C'), text: c.priority || 'C' }), el('h2', { text: c.name })),
     el('div', { class: 'actions', style: 'margin-top:8px' },
       c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,

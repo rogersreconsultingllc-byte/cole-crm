@@ -400,3 +400,9 @@ input.search[data-keep="noteq"] { width: 100%; box-sizing: border-box; }
 select.mini { font-size: 12px; padding: 3px 6px; border-radius: 8px; width: auto; }
 .danger-text { color: #b33 !important; }
 .notetag.who { text-transform: none; letter-spacing: 0; color: #2c4f9e; border-color: #c9d6f3; }
+
+/* Call queue — walking Today's calls one card at a time */
+.queuebar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin: -6px 74px 14px 0; padding: 8px 10px; border-radius: 10px; background: #e8eefc; color: #2c4f9e; font-size: 13.5px; }
+.queuebar .muted { color: #5a6f9e; }
+.item.done { opacity: .5; }
+.item.done .name::after { content: ' ✓'; color: #1f7a4d; }
