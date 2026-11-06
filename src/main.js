@@ -1548,7 +1548,7 @@ function openBuyerForm(b = {}) {
 const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
 const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
-const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', ownervm: 'Good # (left VM)', today: 'Called today', later: 'Callback scheduled', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
+const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', ownervm: 'Good # (left VM)', today: 'Called today', later: 'Retry later', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
 const PHONE_BAD = ['Wrong number', 'Disconnected', 'Do not call']
 const P_OWN = { nopublic: ['Skip public/institutional', null], verified: ['Owner verified', null], unverified: ['Owner not verified yet', null], public: ['Public/institutional', null], all: ['Everyone', null] }
 const OWN_TAG = { 'Owner match': ['✓ owner', 'own-ok', 'County records list this person (or their family) as owner'], 'Company match': ['✓ company', 'own-ok', 'County records list their company as owner'], 'Different owner': ['owner differs', 'own-q', 'County records show a different owner name — confirm on the call'], 'Public/institution': ['public owner', 'own-x', 'Owned by a government, hospital, school or similar'], 'Not checked': ['not checked', 'own-q', 'Could not match this parcel in county records'], 'Not found': ['owner not found', 'own-q', 'Parcel not in county data — likely an office condo'], 'Out of market': ['out of market', 'own-x', 'Outside Florida'] }
@@ -1613,7 +1613,8 @@ async function loadProspects() {
     else if (P.status === 'bad') q = q.eq('callable', 0).eq('all_bad', true)
   }
   // Owners with numbers to dial first; buildings with no live numbers sink to the bottom
-  if (P.status === 'tocall') q = q.order('no_live').order('callback_on', { ascending: true, nullsFirst: false }).order('next_due').order('attempts').order('best_rank').order('address')
+  // Follow-ups he scheduled first, then owners never called, then no-answer retries (fewest tries first)
+  if (P.status === 'tocall') q = q.order('no_live').order('callback_on', { ascending: true, nullsFirst: false }).order('attempts').order('next_due').order('best_rank').order('address')
   else if (P.status === 'later' || P.status === 'ownervm') q = q.order('no_live').order('next_due').order('address')
   else if (P.status === 'never') q = q.order('no_live').order('best_rank').order('address')
   else if (P.status === 'today') q = q.order('last_attempt_at', { ascending: false })
@@ -1645,7 +1646,7 @@ function prospectsView() {
     el('div', { class: 'filters county-chips' },
       el('button', { class: 'chip' + (!P.county ? ' on' : ''), onclick: () => setPF({ county: '' }) }, `All counties${toCallAll ? ' · ' + toCallAll.toLocaleString() : ''}`),
       P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
-    el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call (due first)' : k === 'never' && P.neverCount != null ? `${v} · ${P.neverCount.toLocaleString()}` : v))),
+    el('div', { class: 'filters status-tabs' }, Object.entries(P_STATUS_LABEL).map(([k, v]) => el('button', { class: 'chip' + (P.status === k ? ' on' : ''), onclick: () => setPF({ status: k }) }, k === 'tocall' ? 'To call' : k === 'never' && P.neverCount != null ? `${v} · ${P.neverCount.toLocaleString()}` : v))),
     el('div', { class: 'filters' }, search,
       el('select', { class: 'chip', title: 'Checked against the LLC (Sunbiz) and county property records', onchange: e => setPF({ own: e.target.value }) }, Object.entries(P_OWN).map(([k, v]) => el('option', { value: k, text: v[0], selected: P.own === k })))),
     (() => {
@@ -1663,7 +1664,6 @@ function prospectsView() {
     el('div', { class: 'card' },
       P.loading && !P.rows.length ? el('div', { class: 'empty', text: 'Loading…' }) :
       P.rows.length ? el('ul', { class: 'list' }, P.rows.map(b => {
-        const due = b.next_due && b.next_due <= T
         const fuDue = b.callback_on && b.callback_on <= T
         const st = bStatus(b)
         return el('li', { class: 'item', onclick: () => openBuilding(b.id) },
@@ -1676,7 +1676,7 @@ function prospectsView() {
               b.any_converted ? el('span', { class: 'tag', text: 'contact' }) : null,
               b.attempts ? el('span', { class: 'tag', text: `${b.attempts} attempt${b.attempts > 1 ? 's' : ''}` }) : null,
               b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
-              : due && b.attempts ? el('span', { class: 'late', text: 'callback due' }) : null),
+              : null), // no-answer / voicemail retries aren't "callbacks" — only follow-ups Cole set himself are flagged
             P.q.trim() && !phoneQuery(P.q.trim()) ? (() => { const ws = P.q.trim().toLowerCase().split(/\s+/); const hit = String(b.names || '').split(' · ').find(n => ws.every(w => n.toLowerCase().includes(w))); return hit ? el('div', { class: 'sub', style: 'font-weight:600', text: '👤 ' + hit }) : !String(b.search_text || '').includes(ws[0]) || !ws.every(w => String(b.search_text || '').includes(w)) ? el('div', { class: 'sub', text: '👤 match is someone hidden in the cleanup — open the card → Show removed' }) : null })() : null,
             el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })),
           paButton(b, { cls: 'btn small ghost pa-btn', label: '🏛' }))
@@ -1857,7 +1857,7 @@ async function recordAttempt(r, ph, outcome, phoneStatus, note) {
     sb.from('prospects').update({ status, attempts, last_attempt_at: now, next_attempt_on: next, callback_time: null, callback_note: null, updated_at: now }).eq('id', r.id),
   ])
   const err = res.find(x => x.error); if (err) { toast(err.error.message); return }
-  const msg = status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · retry ${fmt(next, { weekday: 'short', month: 'short', day: 'numeric' })}`
+  const msg = status === 'Bad data' ? 'No live numbers left — moved to the skip-trace list' : status === 'Do not call' ? 'Marked do not call' : `${outcome} logged · back in the queue after owners you haven’t called`
   // Every number for every owner on this building tried today (or dead)? Move straight to the next building.
   const todayStr = ymd(T)
   const tried = x => PHONE_BAD.includes(x.status) || (x.last_called_at && ymd(new Date(x.last_called_at)) === todayStr)
