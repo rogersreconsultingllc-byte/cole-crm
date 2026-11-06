@@ -29,14 +29,15 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 /* ---------- State ---------- */
 const S = {
   session: null,
-  contacts: [], convos: [], buyers: [], pins: [], props: [],
+  contacts: [], convos: [], buyers: [], pins: [], props: [], phones: [],
+  calling: {}, // contact id → contact_phones id picked as "who I'm calling"
   tab: localStorage.getItem('tab') || 'today',
   q: '', pri: new Set(), type: '',
   pipeMode: localStorage.getItem('pipeMode') || 'board', pipeQ: '',
   calMonth: firstOfMonth(new Date()),
   live: false,
 }
-const TABLE_KEY = { contacts: 'contacts', conversations: 'convos', buyers: 'buyers', pins: 'pins', properties: 'props' }
+const TABLE_KEY = { contacts: 'contacts', conversations: 'convos', buyers: 'buyers', pins: 'pins', properties: 'props', contact_phones: 'phones' }
 
 /* ---------- Helpers ---------- */
 function el(tag, attrs, ...kids) {
@@ -101,6 +102,13 @@ const convosFor = id => S.convos.filter(v => v.contact_id === id).sort((a, b) =>
 const contactById = id => S.contacts.find(c => c.id === id)
 const propById = id => S.props.find(p => String(p.id) === String(id))
 const propsFor = cid => S.props.filter(p => p.contact_id === cid)
+// Every number on a contact card, with whose number it is. Main number first, dead numbers last.
+const PHONE_DEAD = ['Wrong number', 'Disconnected', 'Do not call']
+const phonesFor = cid => S.phones.filter(p => p.contact_id === cid)
+  .sort((a, b) => (b.is_primary - a.is_primary) || (PHONE_DEAD.includes(a.status) - PHONE_DEAD.includes(b.status)) || (/former/i.test(a.role || '') - /former/i.test(b.role || '')) || a.id - b.id)
+// Who is being called right now on this card (defaults to the main number)
+const callingFor = c => { const ps = phonesFor(c.id); return ps.find(p => p.id === S.calling[c.id]) || ps.find(p => p.is_primary) || ps[0] || null }
+const isOtherPerson = (c, ph) => ph && ph.person_name && ph.person_name.trim().toLowerCase() !== String(c.name || '').trim().toLowerCase()
 const propTitle = p => p.name ? `${p.name} — ${p.address}` : p.address
 
 // DOR use codes → plain labels + product type
@@ -117,7 +125,7 @@ const dorInfo = code => { const n = parseInt(code, 10); return isNaN(n) ? null :
 
 /* ---------- Data ---------- */
 async function loadTable(t) {
-  const order = { contacts: 'name', conversations: 'talked_on', buyers: 'name', pins: 'created_at', properties: 'address' }[t]
+  const order = { contacts: 'name', conversations: 'talked_on', buyers: 'name', pins: 'created_at', properties: 'address', contact_phones: 'contact_id' }[t]
   // Supabase returns at most 1,000 rows per request — page through so nothing is silently cut off
   const PAGE = 1000, rows = []
   for (let from = 0; ; from += PAGE) {
@@ -322,6 +330,7 @@ function phoneQuery(q) {
   return d.length >= 4 ? d : null
 }
 const digitsOf = s => String(s || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')
+const cardHasDigits = (c, d) => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d) || phonesFor(c.id).some(p => String(p.digits || '').includes(d))
 const phoneLike = d => '*' + d.split('').join('*') + '*'
 // Prospects with a matching number (any of their numbers) — shown under Contacts results
 const PHQ = { q: null, rows: [], busy: false }
@@ -336,8 +345,8 @@ async function findProspectsByPhone(d) {
 function matches(c, q) {
   if (!q) return true
   const pd = phoneQuery(q.trim())
-  if (pd) return digitsOf(c.phone).includes(pd)
-  const hay = [c.name, c.company, c.phone, c.email, c.address, c.address_query, c.city, c.county, c.notes, c.next_note, c.contact_type,
+  if (pd) return cardHasDigits(c, pd)
+  const hay = [c.name, c.company, c.phone, c.email, ...phonesFor(c.id).map(p => [p.person_name, p.role, p.notes].join(' ')), c.address, c.address_query, c.city, c.county, c.notes, c.next_note, c.contact_type,
     ...convosFor(c.id).map(v => v.notes), ...propsFor(c.id).map(p => [p.address, p.name, p.notes, p.stage, p.product_type].join(' '))].join(' ').toLowerCase()
   return q.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w))
 }
@@ -992,9 +1001,15 @@ function refreshDrawer(fresh) {
 const markDirty = e => { e.target.dataset.dirty = '1' }
 
 /* ---------- Logging calls ---------- */
-async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting, propertyId }) {
-  const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note, property_id: propertyId || null })
+async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting, propertyId, phoneStatus }) {
+  // Tag the call with whoever was on the number picked in "Calling"
+  const ph = callingFor(c)
+  const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note, property_id: propertyId || null,
+    spoke_with: ph?.person_name || null, phone: ph?.phone || null })
   if (e1) throw e1
+  if (ph && phoneStatus && phoneStatus !== ph.status && !(phoneStatus === 'Voicemail' && ph.status === 'Good')) {
+    await sb.from('contact_phones').update({ status: phoneStatus }).eq('id', ph.id)
+  }
   const patch = { priority, next_follow_up: next || null, next_time: nextTime || null, next_note: nextNote || null, updated_at: nowIso() }
   if (!c.last_contact || c.last_contact <= talked) patch.last_contact = talked
   const { error: e2 } = await sb.from('contacts').update(patch).eq('id', c.id)
@@ -1002,7 +1017,7 @@ async function logCall(c, { note, talked, priority, next, nextTime, nextNote, me
   // Move this owner's properties along the pipeline
   const bump = propsFor(c.id).filter(p => (propertyId && meeting ? String(p.id) === String(propertyId) && ['Prospect', 'Contacted'].includes(p.stage) : p.stage === 'Prospect' || (meeting && p.stage === 'Contacted')))
   for (const p of bump) await sb.from('properties').update({ stage: meeting ? 'Meeting' : 'Contacted', stage_updated_at: nowIso(), updated_at: nowIso() }).eq('id', p.id)
-  await Promise.all([loadTable('conversations'), loadTable('contacts'), bump.length ? loadTable('properties') : null])
+  await Promise.all([loadTable('conversations'), loadTable('contacts'), loadTable('contact_phones'), bump.length ? loadTable('properties') : null])
 }
 // Dial reminder shown wherever Cole makes calls
 const pitchTip = () => el('div', { class: 'pitch-tip' }, el('strong', { text: 'On the call: ' }), 'say “a strategic analysis of your building,” not “BOV” or “proposal.”')
@@ -1013,17 +1028,18 @@ function outcomeBar(c, notesField) {
     btn.disabled = true
     try {
       const note = extra() ? `${label} — ${extra()}` : label
-      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting, propertyId: opts.propertyId })
-      toast(`${label} logged · next call ${fmt(ymd(opts.next), { weekday: 'short', month: 'short', day: 'numeric' })}`)
+      const ph = callingFor(c)
+      await logCall(c, { note, talked: ymd(T), priority: opts.priority || pri, next: ymd(opts.next), nextTime: opts.nextTime, nextNote: opts.nextNote, meeting: opts.meeting, propertyId: opts.propertyId, phoneStatus: opts.phoneStatus })
+      toast(`${label} logged${isOtherPerson(c, ph) ? ' for ' + ph.person_name : ''} · next call ${fmt(ymd(opts.next), { weekday: 'short', month: 'short', day: 'numeric' })}`)
       render({ soft: true }); refreshDrawer(true)
     } catch (x) { toast('Couldn’t save: ' + (x.message || x)); btn.disabled = false }
   }
   const meetBox = el('div', { class: 'meetbox hidden' })
   const bar = el('div', { class: 'outcomes' },
     el('button', { class: 'oc', onclick: e => run(e.currentTarget, 'No answer', { next: addBusinessDays(T, 1), nextNote: 'Try again — no answer ' + fmt(ymd(T)) }) }, el('b', { text: 'No answer' }), el('span', { text: 'retry next business day' })),
-    el('button', { class: 'oc', onclick: e => run(e.currentTarget, 'Left voicemail', { next: addBusinessDays(T, 2), nextNote: 'Follow up on voicemail from ' + fmt(ymd(T)) }) }, el('b', { text: 'Left VM' }), el('span', { text: 'follow up in 2 business days' })),
+    el('button', { class: 'oc', onclick: e => run(e.currentTarget, 'Left voicemail', { next: addBusinessDays(T, 2), nextNote: 'Follow up on voicemail from ' + fmt(ymd(T)), phoneStatus: 'Voicemail' }) }, el('b', { text: 'Left VM' }), el('span', { text: 'follow up in 2 business days' })),
     el('button', { class: 'oc', onclick: () => { notesField.focus(); notesField.scrollIntoView({ block: 'center', behavior: 'smooth' }) } }, el('b', { text: 'Talked' }), el('span', { text: 'add notes below' })),
-    el('button', { class: 'oc', onclick: e => run(e.currentTarget, 'Not interested', { priority: 'C', next: addCadence(T, 'C'), nextNote: 'Quarterly check-in — see if anything has changed' }) }, el('b', { text: 'Not interested' }), el('span', { text: 'set C, check back in 3 mo' })),
+    el('button', { class: 'oc', onclick: e => run(e.currentTarget, 'Not interested', { priority: 'C', next: addCadence(T, 'C'), nextNote: 'Quarterly check-in — see if anything has changed', phoneStatus: 'Good' }) }, el('b', { text: 'Not interested' }), el('span', { text: 'set C, check back in 3 mo' })),
     el('button', { class: 'oc meet', onclick: () => meetBox.classList.toggle('hidden') }, el('b', { text: 'Meeting set' }), el('span', { text: 'pick the date' })))
   const mDate = el('input', { type: 'date', value: ymd(addBusinessDays(T, 2)) })
   const mTime = el('input', { type: 'time', value: '10:00' })
@@ -1034,7 +1050,7 @@ function outcomeBar(c, notesField) {
     el('button', { class: 'btn primary small', onclick: e => {
       const t = mTime.value ? new Date('1970-01-01T' + mTime.value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
       const when = `${fmt(mDate.value, { weekday: 'short', month: 'short', day: 'numeric' })}${t ? ' at ' + t : ''}${mWhere.value.trim() ? ' — ' + mWhere.value.trim() : ''}`
-      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextTime: mTime.value || null, nextNote: 'MEETING ' + when, meeting: true, propertyId: mAbout.value || null })
+      run(e.currentTarget, 'Meeting set for ' + when, { next: parse(mDate.value) || T, nextTime: mTime.value || null, nextNote: 'MEETING ' + when, meeting: true, propertyId: mAbout.value || null, phoneStatus: 'Good' })
     } }, 'Save meeting'))
   return el('div', null, bar, meetBox)
 }
@@ -1050,7 +1066,8 @@ const propLabel = id => { const p = propById(Number(id)) || S.props.find(x => St
 
 /* ---------- Contact drawer ---------- */
 function contactDetail(c) {
-  const tel = telHref(c.phone), all = convosFor(c.id), hist = all.filter(v => !isText(v.notes)), texts = all.filter(v => isText(v.notes)), props = propsFor(c.id)
+  const calling = callingFor(c), callNum = calling?.phone || c.phone
+  const tel = telHref(callNum), all = convosFor(c.id), hist = all.filter(v => !isText(v.notes)), texts = all.filter(v => isText(v.notes)), props = propsFor(c.id)
   const talked = el('input', { type: 'date', value: ymd(today()), oninput: markDirty })
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?', oninput: markDirty })
   const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: (c.priority || 'C') === p })))
@@ -1065,7 +1082,7 @@ function contactDetail(c) {
     if (!notes.value.trim()) { logErr.textContent = 'Add a note about the conversation.'; return }
     save.disabled = true; logErr.textContent = ''
     try {
-      await logCall(c, { note: notes.value.trim(), talked: talked.value, priority: pri.value, next: nextDate.value, nextTime: nextTime.value, nextNote: nextStep.value.trim() })
+      await logCall(c, { note: notes.value.trim(), talked: talked.value, priority: pri.value, next: nextDate.value, nextTime: nextTime.value, nextNote: nextStep.value.trim(), phoneStatus: 'Good' })
       toast('Conversation saved'); render({ soft: true }); refreshDrawer(true)
     } catch (x) { logErr.textContent = 'Couldn’t save: ' + (x.message || x); save.disabled = false }
   }
@@ -1074,9 +1091,10 @@ function contactDetail(c) {
     el('div', { class: 'actions', style: 'margin-top:8px' },
       c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type }) : null,
       el('span', { class: 'muted', style: 'font-size:13px', text: (CADENCE[c.priority] || CADENCE.C).label + ' follow-up' }),
-      tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + c.phone) : null,
-      smsHref(c.phone) ? el('a', { class: 'btn small', href: smsHref(c.phone) }, 'Text') : null),
+      tel ? el('a', { class: 'btn small primary', href: tel, style: 'margin-left:auto' }, 'Call ' + (isOtherPerson(c, calling) ? calling.person_name.split(' ')[0] + ' · ' : '') + callNum) : null,
+      smsHref(callNum) ? el('a', { class: 'btn small', href: smsHref(callNum) }, 'Text') : null),
     el('div', { class: 'nextcall' }, el('span', { class: 'muted', text: 'Next call' }), el('b', { text: fmt(c.next_follow_up, LONG) + (c.next_follow_up ? ' · ' + (c.next_time ? fmtTime(c.next_time) : 'first call block') : '') }), c.next_note ? el('div', { text: c.next_note }) : null),
+    phonesSection(c),
     el('div', { class: 'section-title', text: 'How did the call go?' }),
     pitchTip(),
     outcomeBar(c, notes),
@@ -1090,7 +1108,6 @@ function contactDetail(c) {
     (() => { const mp = props.find(x => x.lat != null && x.stage !== 'Dead'); return mp ? nearbySection(mp) : null })(),
     docsSection(c, 'contacts'),
     el('dl', { class: 'facts' },
-      el('dt', { text: 'Phone' }), el('dd', null, tel ? el('a', { href: tel, text: c.phone }) : '—', c.phone_note ? el('span', { class: 'muted', text: ' · ' + c.phone_note }) : null),
       c.email ? [el('dt', { text: 'Email' }), el('dd', null, el('a', { href: 'mailto:' + c.email, text: c.email }))] : null,
       c.company ? [el('dt', { text: 'Company' }), el('dd', { text: c.company })] : null,
       el('dt', { text: 'Last talked' }), el('dd', { text: fmt(c.last_contact, LONG) }),
@@ -1111,7 +1128,8 @@ function contactDetail(c) {
     })(),
     textSection(c, texts),
     el('h4', { text: `Conversation history (${hist.length})` }),
-    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', { class: isNote(v.notes) ? 'note' : null }, el('div', { class: 'date' }, fmt(v.talked_on, LONG), isNote(v.notes) ? el('span', { class: 'notetag', text: 'Note' }) : null, v.property_id && propLabel(v.property_id) ? el('span', { class: 'notetag', text: '🏢 ' + propLabel(v.property_id) }) : null), el('div', { class: 'txt', text: isNote(v.notes) ? noteBody(v.notes) : v.notes }))))
+    hist.length ? el('ul', { class: 'timeline' }, hist.map(v => el('li', { class: isNote(v.notes) ? 'note' : null }, el('div', { class: 'date' }, fmt(v.talked_on, LONG), isNote(v.notes) ? el('span', { class: 'notetag', text: 'Note' }) : null, v.property_id && propLabel(v.property_id) ? el('span', { class: 'notetag', text: '🏢 ' + propLabel(v.property_id) }) : null,
+        v.spoke_with && v.spoke_with.trim().toLowerCase() !== String(c.name).trim().toLowerCase() ? el('span', { class: 'notetag who', title: v.phone || '', text: '📞 ' + v.spoke_with }) : null), el('div', { class: 'txt', text: isNote(v.notes) ? noteBody(v.notes) : v.notes }))))
       : el('p', { class: 'muted', text: 'No conversations logged yet.' }),
     el('div', { class: 'actions', style: 'margin-top:20px' }, el('button', { class: 'btn', onclick: () => openContactForm(c) }, 'Edit contact'),
       el('button', { class: 'btn danger', style: 'margin-left:auto', onclick: e => deleteContact(c, e.currentTarget) }, 'Delete contact')))
@@ -1634,7 +1652,7 @@ function prospectsView() {
       const d = phoneQuery(P.q.trim())
       const t = d ? null : P.q.trim().toLowerCase()
       if (!d && (!t || t.length < 3)) return null
-      const cs = d ? S.contacts.filter(c => digitsOf(c.phone).includes(d) || digitsOf(c.phone_note).includes(d))
+      const cs = d ? S.contacts.filter(c => cardHasDigits(c, d))
         : S.contacts.filter(c => t.split(/\s+/).every(w => [c.name, c.company].join(' ').toLowerCase().includes(w)))
       return cs.length ? [el('div', { class: 'section-title', text: `In your contacts (${cs.length})` }), el('div', { class: 'card', style: 'margin-bottom:10px' }, el('ul', { class: 'list' }, cs.map(c => contactRow(c))))] : null
     })(),
@@ -1662,7 +1680,7 @@ function prospectsView() {
             P.q.trim() && !phoneQuery(P.q.trim()) ? (() => { const ws = P.q.trim().toLowerCase().split(/\s+/); const hit = String(b.names || '').split(' · ').find(n => ws.every(w => n.toLowerCase().includes(w))); return hit ? el('div', { class: 'sub', style: 'font-weight:600', text: '👤 ' + hit }) : !String(b.search_text || '').includes(ws[0]) || !ws.every(w => String(b.search_text || '').includes(w)) ? el('div', { class: 'sub', text: '👤 match is someone hidden in the cleanup — open the card → Show removed' }) : null })() : null,
             el('div', { class: 'sub', text: [b.callback_note ? '→ ' + b.callback_note : null, b.names, b.owner_of_record && !String(b.names || '').toUpperCase().includes(String(b.owner_of_record).toUpperCase()) ? b.owner_of_record : null, b.building_sf ? num(b.building_sf) + ' SF' : b.product_type, `${b.live_phones}/${b.all_phones} numbers live`].filter(Boolean).join(' · ') })),
           paButton(b, { cls: 'btn small ghost pa-btn', label: '🏛' }))
-      })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => digitsOf(c.phone).includes(phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No buildings match.' })),
+      })) : el('div', { class: 'empty', text: !P.loaded ? 'Loading…' : phoneQuery(P.q.trim()) ? `No prospect has a number containing ${phoneQuery(P.q.trim())}${S.contacts.some(c => cardHasDigits(c, phoneQuery(P.q.trim()))) ? ' — it’s on a contact above.' : '.'}` : 'No buildings match.' })),
     P.total > P_PAGE ? el('div', { class: 'pager' },
       el('button', { class: 'btn small', disabled: P.page === 0, onclick: () => { P.page--; refreshProspects() } }, '‹ Prev'),
       el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} buildings` }),
@@ -2706,6 +2724,103 @@ async function deleteProspect(r, btn) {
 
 /* Co-owners: other owners/managers on this contact's buildings (from the prospect list), shown apart from the contact */
 const COOWN = {}
+/* ---------- Phone numbers on a contact card, each tagged with whose it is ---------- */
+const PHONE_ROLES = ['Owner', 'Co-owner', 'Partner', 'Spouse', 'LLC manager / officer', 'Office / assistant', 'Property manager', 'Tenant', 'Former owner', 'Other']
+const PHONE_STATUSES = ['Good', 'Untested', 'No answer', 'Voicemail', 'Wrong number', 'Disconnected', 'Do not call']
+async function reloadPhones() { await Promise.all([loadTable('contact_phones'), loadTable('contacts')]); render({ soft: true }); refreshDrawer(true) }
+
+function phonesSection(c) {
+  const list = phonesFor(c.id), calling = callingFor(c)
+  const formSlot = el('div')
+  const openForm = ph => { formSlot.replaceChildren(phoneForm(c, ph, () => formSlot.replaceChildren())); formSlot.querySelector('input')?.focus() }
+  const pick = ph => { S.calling[c.id] = ph.id }
+  const row = ph => {
+    const dead = PHONE_DEAD.includes(ph.status), on = calling && calling.id === ph.id, other = isOtherPerson(c, ph)
+    const status = el('select', { class: 'mini', title: 'Number status', onchange: async e => {
+      const { error } = await sb.from('contact_phones').update({ status: e.target.value }).eq('id', ph.id)
+      if (error) toast(error.message); else { toast(`${ph.phone} marked ${e.target.value}`); reloadPhones() }
+    } }, PHONE_STATUSES.map(s => el('option', { value: s, text: s, selected: s === ph.status })))
+    return el('div', { class: 'cphone' + (dead ? ' dead' : '') + (on ? ' on' : '') },
+      el('div', { class: 'ph-head' },
+        el('a', { class: 'tel', href: telHref(ph.phone), onclick: () => { pick(ph); setTimeout(() => refreshDrawer(), 50) }, text: ph.phone }),
+        el('b', { text: ph.person_name || 'Unknown' }),
+        ph.role ? el('span', { class: other ? 'cotag' : 'ptag', text: ph.role }) : null,
+        ph.is_primary ? el('span', { class: 'ptag good', text: '★ Main' }) : null,
+        dead ? el('span', { class: 'ptag ' + slug(ph.status), text: ph.status }) : null,
+        on && list.length > 1 ? el('span', { class: 'calling-tag', text: 'Calling' }) : null),
+      ph.notes ? el('div', { class: 'muted', style: 'font-size:12.5px;margin-top:3px', text: ph.notes }) : null,
+      el('div', { class: 'actions', style: 'margin-top:6px;gap:6px' },
+        !on && !dead ? el('button', { class: 'btn small', title: 'Calls you log from the buttons below get tagged with this person', onclick: () => { pick(ph); refreshDrawer(true) } }, 'I’m calling ' + (ph.person_name ? ph.person_name.split(' ')[0] : 'this number')) : null,
+        smsHref(ph.phone) && !dead ? el('a', { class: 'btn small ghost', href: smsHref(ph.phone) }, 'Text') : null,
+        status,
+        el('button', { class: 'btn small ghost', onclick: () => openForm(ph) }, 'Edit'),
+        !ph.is_primary && !dead ? el('button', { class: 'btn small ghost', title: 'Use this as the card’s main number (calendar events, call lists)', onclick: async () => {
+          const { error } = await sb.from('contacts').update({ phone: ph.phone, updated_at: nowIso() }).eq('id', c.id)
+          if (error) toast(error.message); else { toast(`${ph.phone} is now the main number`); reloadPhones() }
+        } }, 'Make main') : null,
+        el('button', { class: 'btn small ghost danger-text', onclick: e => removePhone(c, ph, e.currentTarget) }, 'Remove')))
+  }
+  return el('div', { class: 'cphones' },
+    el('div', { class: 'section-title', style: 'margin-top:14px', text: `Phone numbers (${list.length})` }),
+    list.length > 1 ? el('p', { class: 'muted', style: 'font-size:12.5px;margin:0 0 6px', text: 'Tap a number to call it — the outcome you log below is saved under whoever’s number it is.' }) : null,
+    list.length ? list.map(row) : el('p', { class: 'muted', text: 'No numbers yet.' }),
+    formSlot,
+    el('button', { class: 'btn small', onclick: () => openForm(null) }, '+ Add a number'))
+}
+
+function phoneForm(c, ph, close) {
+  const names = [...new Set([c.name, ...phonesFor(c.id).map(p => p.person_name),
+    ...((COOWN[c.id]?.rows || []).flatMap(b => (b.prospect_building_people || []).map(x => x.prospects?.owner_name)))].filter(Boolean))]
+  const dl = 'names-' + slug(c.id)
+  const phone = el('input', { type: 'tel', value: ph?.phone || '', placeholder: '(941) 555-0123' })
+  const person = el('input', { value: ph?.person_name || '', placeholder: 'Whose number is it?', list: dl })
+  const roles = ph?.role && !PHONE_ROLES.includes(ph.role) ? [ph.role, ...PHONE_ROLES] : PHONE_ROLES
+  const role = el('select', null, roles.map(r => el('option', { value: r, text: r, selected: ph ? ph.role === r : r === 'Co-owner' })))
+  const note = el('input', { value: ph?.notes || '', placeholder: 'Optional — e.g. cell, office line, best after 5' })
+  person.addEventListener('change', () => { if (!ph && person.value.trim().toLowerCase() === c.name.toLowerCase()) role.value = 'Owner' })
+  const err = el('div', { class: 'err' })
+  const save = el('button', { class: 'btn primary small' }, ph ? 'Save number' : 'Add number')
+  save.onclick = async () => {
+    const digits = phone.value.replace(/\D/g, '')
+    if (digits.length < 7) { err.textContent = 'Enter the phone number.'; return }
+    if (!person.value.trim()) { err.textContent = 'Say whose number it is.'; return }
+    save.disabled = true; err.textContent = ''
+    const row = { phone: fmtPhone(phone.value), person_name: person.value.trim(), role: role.value, notes: note.value.trim() || null }
+    const { error } = ph ? await sb.from('contact_phones').update(row).eq('id', ph.id)
+      : await sb.from('contact_phones').insert({ ...row, contact_id: c.id, status: 'Untested' })
+    if (error) { err.textContent = /duplicate|unique/i.test(error.message) ? 'That number is already on this card.' : 'Couldn’t save: ' + error.message; save.disabled = false; return }
+    // Editing the main number keeps the card's main phone in step
+    if (ph?.is_primary && row.phone !== ph.phone) await sb.from('contacts').update({ phone: row.phone, updated_at: nowIso() }).eq('id', c.id)
+    toast(ph ? 'Number updated' : `Added ${row.phone} for ${row.person_name}`); close(); reloadPhones()
+  }
+  return el('div', { class: 'box stack', style: 'margin:8px 0' },
+    el('datalist', { id: dl }, names.map(n => el('option', { value: n }))),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Phone', phone), el('label', { class: 'f' }, 'Whose number', person)),
+    el('div', { class: 'row2' }, el('label', { class: 'f' }, 'Their role', role), el('label', { class: 'f' }, 'Note', note)),
+    err, el('div', { class: 'actions' }, save, el('button', { class: 'btn small ghost', onclick: close }, 'Cancel')))
+}
+
+async function removePhone(c, ph, btn) {
+  if (btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = 'Tap again to remove'; setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'Remove' }, 3000); return }
+  btn.disabled = true
+  if (ph.is_primary) {
+    // Hand the main-number job to the next working number (or clear it)
+    const next = phonesFor(c.id).find(p => p.id !== ph.id && !PHONE_DEAD.includes(p.status))
+    await sb.from('contacts').update({ phone: next?.phone || null, updated_at: nowIso() }).eq('id', c.id)
+  }
+  const { error } = await sb.from('contact_phones').delete().eq('id', ph.id)
+  if (error) { toast(error.message); btn.disabled = false; return }
+  if (S.calling[c.id] === ph.id) delete S.calling[c.id]
+  toast(`Removed ${ph.phone}`); reloadPhones()
+}
+
+async function addCoOwnerPhone(c, r, p, role) {
+  const { error } = await sb.from('contact_phones').insert({ contact_id: c.id, phone: p.phone, person_name: r.owner_name, role: r.title || role || 'Co-owner',
+    status: PHONE_STATUSES.includes(p.status) ? p.status : 'Untested', notes: r.company || null })
+  if (error) toast(/duplicate|unique/i.test(error.message) ? 'Already on the card' : error.message)
+  else { toast(`Added ${r.owner_name}’s ${p.phone} to the card`); reloadPhones() }
+}
+
 function coOwnersSection(c) {
   const props = propsFor(c.id)
   if (!props.length) return null
@@ -2735,7 +2850,12 @@ function coOwnersSection(c) {
         el('div', { class: 'ph-head' }, el('span', { class: 'cotag', text: 'Co-owner' }), el('b', { text: r.owner_name }), r.title || role ? el('span', { class: 'muted', text: r.title || role }) : null, verifyTag(verified),
           r.status === 'Converted' ? el('span', { class: 'ptag converted', text: 'Contact' }) : el('span', { class: 'ptag ' + slug(r.status), text: r.status })),
         el('div', { class: 'muted', style: 'font-size:12.5px', text: '🏢 ' + [bTitle(b), b.city].filter(Boolean).join(', ') + (r.company ? ' · ' + r.company : '') }),
-        live.length ? el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-top:4px' }, live.map(p => el('a', { class: 'tel', href: telHref(p.phone), text: p.phone }))) : el('div', { class: 'muted', style: 'font-size:12.5px', text: 'No working numbers' }),
+        live.length ? el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-top:4px' }, live.map(p => {
+          const onCard = phonesFor(c.id).some(x => x.digits === digitsOf(p.phone))
+          return el('span', { style: 'display:inline-flex;gap:4px;align-items:center' }, el('a', { class: 'tel', href: telHref(p.phone), text: p.phone }),
+            onCard ? el('span', { class: 'muted', style: 'font-size:12px', text: '✓ on card' })
+              : el('button', { class: 'btn small ghost', title: `Put this number on ${c.name.split(' ')[0]}’s card, labeled as ${r.owner_name}’s`, onclick: e => { e.currentTarget.disabled = true; addCoOwnerPhone(c, r, p, role) } }, '+ Add to card'))
+        })) : el('div', { class: 'muted', style: 'font-size:12.5px', text: 'No working numbers' }),
         el('div', { class: 'actions', style: 'margin-top:6px' },
           r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn small', onclick: () => openContact(r.converted_contact_id) }, 'Open their contact card') : el('button', { class: 'btn small', onclick: () => { go('prospects'); openBuilding(b.id) } }, 'Call from the building card')))
     }))

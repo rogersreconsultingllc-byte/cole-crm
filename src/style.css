@@ -389,3 +389,14 @@ input.search[data-keep="noteq"] { width: 100%; box-sizing: border-box; }
 .btn.small.vmok.on { background: rgba(63,178,127,.18); }
 
 .item .pa-btn{flex:none;padding:4px 8px;font-size:15px;line-height:1;text-decoration:none;margin-left:6px}
+
+/* Phone numbers on a contact card — each tagged with whose number it is */
+.cphones { margin: 6px 0 4px; }
+.cphone { border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; margin-bottom: 8px; background: var(--panel); }
+.cphone.on { border-color: #7fa6e6; box-shadow: 0 0 0 2px color-mix(in srgb, #7fa6e6 25%, transparent); }
+.cphone.dead { opacity: .55; }
+.cphone .actions .btn.small { padding: 4px 9px; }
+.calling-tag { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: #2c4f9e; color: #fff; letter-spacing: .3px; }
+select.mini { font-size: 12px; padding: 3px 6px; border-radius: 8px; width: auto; }
+.danger-text { color: #b33 !important; }
+.notetag.who { text-transform: none; letter-spacing: 0; color: #2c4f9e; border-color: #c9d6f3; }
