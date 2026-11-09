@@ -1579,7 +1579,7 @@ function openBuyerForm(b = {}) {
 }
 
 /* ---------- Prospects (owners not yet talked to) ---------- */
-const P = { county: localStorage.getItem('pCounty') || '', status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
+const P = { county: localStorage.getItem('pCounty') || '', list: localStorage.getItem('pList') || '', lists: [], status: 'tocall', own: 'nopublic', q: '', page: 0, rows: [], total: 0, counts: [], loading: false, loaded: false, reqId: 0 }
 const P_PAGE = 50
 const P_STATUS = { tocall: ['New', 'Attempted'], never: ['New', 'Attempted'], today: null, later: ['Attempted'], reached: ['Reached'], bad: ['Bad data'], ni: ['Not interested'], dnc: ['Do not call'], converted: ['Converted'], all: null }
 const P_STATUS_LABEL = { tocall: 'To call', never: 'Haven’t called', ownervm: 'Good # (left VM)', today: 'Called today', later: 'Retry later', reached: 'Reached', bad: 'Needs skip trace', ni: 'Not interested', dnc: 'Do not call', converted: 'Converted', all: 'All' }
@@ -1599,6 +1599,7 @@ const bkeyOf = (addr, city) => String(addr || '').replace(/[.,#]/g, '').replace(
 
 /* The prospect list is one card per BUILDING; every owner/manager hangs off it with their own numbers */
 function applyBuildingFilters(q) {
+  if (P.list) q = q.eq('list_name', P.list) // a named call list (e.g. "120 Days + On Market") keeps every tab inside that list
   if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
   q = q.gt('n_people', 0)
   if (P.own === 'nopublic') q = q.neq('best_rank', 4)
@@ -1610,9 +1611,13 @@ function applyBuildingFilters(q) {
 async function loadProspectCounts() {
   const { data, error } = await sb.rpc('prospect_building_county_counts')
   if (!error) P.counts = data || []
+  const { data: lists } = await sb.rpc('prospect_list_names')
+  P.lists = lists || []
+  if (P.list && P.lists.length && !P.lists.some(l => l.list_name === P.list)) { P.list = ''; try { localStorage.removeItem('pList') } catch { } }
   // Buildings where nobody has been dialed yet — shown on the "Haven't called" tab
   let nq = sb.from('prospect_building_list').select('id', { count: 'exact', head: true }).gt('callable', 0).eq('attempts', 0).neq('best_rank', 4)
   if (P.county) nq = P.county === 'Unknown' ? nq.is('county', null) : nq.eq('county', P.county)
+  if (P.list) nq = nq.eq('list_name', P.list)
   const { count } = await nq
   P.neverCount = count ?? null
 }
@@ -1633,6 +1638,7 @@ async function loadProspects() {
     if (my !== P.reqId) return
     const ids = (hits || []).map(h => h.id)
     q = q.in('id', ids.length ? ids : [-1])
+    if (P.list) q = q.eq('list_name', P.list) // searching inside a call list stays inside it
   } else {
     q = applyBuildingFilters(q)
     if (P.status === 'tocall') q = q.gt('callable', 0).lte('next_due', T0)
@@ -1677,6 +1683,10 @@ function prospectsView() {
         el('button', { class: 'btn', onclick: exportSkipTrace }, 'Skip-trace list'),
         el('button', { class: 'btn', onclick: () => openProspectForm() }, '+ Prospect'),
         el('button', { class: 'btn primary', onclick: openImport }, 'Import CSV'))),
+    P.lists.length ? el('div', { class: 'filters list-pick' },
+      el('select', { class: 'chip' + (P.list ? ' on' : ''), title: 'Work one call list at a time — every tab, the search and “next” stay inside it', onchange: e => setPF({ list: e.target.value }) },
+        el('option', { value: '', text: 'All lists (whole database)', selected: !P.list }),
+        P.lists.map(l => el('option', { value: l.list_name, text: `${l.list_name} · ${Number(l.to_call).toLocaleString()} to call / ${Number(l.total).toLocaleString()}`, selected: P.list === l.list_name })))) : null,
     el('div', { class: 'filters county-chips' },
       el('button', { class: 'chip' + (!P.county ? ' on' : ''), onclick: () => setPF({ county: '' }) }, `All counties${toCallAll ? ' · ' + toCallAll.toLocaleString() : ''}`),
       P.counts.map(c => el('button', { class: 'chip' + (P.county === c.county ? ' on' : ''), onclick: () => setPF({ county: c.county }) }, `${c.county} · ${Number(c.to_call).toLocaleString()}`))),
@@ -1720,7 +1730,7 @@ function prospectsView() {
       el('span', { class: 'muted', text: `Page ${P.page + 1} of ${pages} · ${P.total.toLocaleString()} buildings` }),
       el('button', { class: 'btn small', disabled: P.page + 1 >= pages, onclick: () => { P.page++; refreshProspects() } }, 'Next ›')) : null)
 }
-function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage.setItem('pCounty', P.county) } catch { } P.rows = []; P.loading = true; render({ soft: true }); refreshProspects() }
+function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage.setItem('pCounty', P.county); localStorage.setItem('pList', P.list) } catch { } P.rows = []; P.loading = true; render({ soft: true }); refreshProspects() }
 
 /* Building drawer */
 // Buildings you've opened, in order — "Previous" walks back through them even after the list re-sorts
