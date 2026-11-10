@@ -1718,6 +1718,7 @@ function prospectsView() {
               b.has_verified ? el('span', { class: 'otag own-ok', text: '✓ verified' }) : null,
               b.has_owner_vm ? el('span', { class: 'otag own-ok', title: 'You left a voicemail and confirmed this is the owner’s number', text: '✓ owner VM' }) : null,
               b.any_converted ? el('span', { class: 'tag', text: 'contact' }) : null,
+              b.list_name && (P.status === 'bad' || !P.list) ? el('span', { class: 'tag', title: 'Call list this building came from', text: b.list_name }) : null,
               b.attempts ? el('span', { class: 'tag', text: `${b.attempts} attempt${b.attempts > 1 ? 's' : ''}` }) : null,
               b.callback_note ? el('span', { class: fuDue ? 'late' : 'tag fu', text: `📅 ${fuDue ? 'follow-up due' : 'follow-up ' + fmt(b.callback_on, { weekday: 'short', month: 'short', day: 'numeric' })}${b.callback_time ? ' · ' + fmtTime(b.callback_time) : ''}` })
               : null), // no-answer / voicemail retries aren't "callbacks" — only follow-ups Cole set himself are flagged
@@ -2266,7 +2267,8 @@ async function runImport(rows, map, phoneCols, source, status) {
 async function exportSkipTrace() {
   const rows = []
   for (let from = 0; ; from += 1000) {
-    let q = sb.from('prospects').select('owner_name,company,property_address,city,zip,county,mailing_address,mailing_city,mailing_state,mailing_zip').eq('status', 'Bad data')
+    let q = sb.from('prospects').select('owner_name,company,property_address,city,zip,county,mailing_address,mailing_city,mailing_state,mailing_zip,skip_trace_list,list_name').eq('status', 'Bad data')
+    if (P.list) q = q.or(`skip_trace_list.eq."${P.list}",list_name.eq."${P.list}"`) // a chosen call list exports only its own owners
     if (P.county) q = P.county === 'Unknown' ? q.is('county', null) : q.eq('county', P.county)
     const { data, error } = await q.range(from, from + 999)
     if (error) { toast(error.message); return }
@@ -2275,9 +2277,9 @@ async function exportSkipTrace() {
   if (!rows.length) { toast('No owners need skip tracing right now'); return }
   const split = n => { const parts = String(n || '').trim().split(/\s+/); return parts.length > 1 ? [parts.slice(0, -1).join(' '), parts.at(-1)] : [n || '', ''] }
   const q = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v }
-  const head = ['First Name', 'Last Name', 'Company', 'Property Address', 'Property City', 'Property State', 'Property Zip', 'Mailing Address', 'Mailing City', 'Mailing State', 'Mailing Zip', 'County']
-  const lines = rows.map(r => { const [fn, ln] = r.company ? ['', ''] : split(r.owner_name); return [fn, ln, r.company || '', r.property_address, r.city, 'FL', r.zip, r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip, r.county].map(q).join(',') })
-  const a = el('a', { href: URL.createObjectURL(new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv' })), download: `skip-trace-${slug(P.county || 'all')}-${ymd(today())}.csv` })
+  const head = ['First Name', 'Last Name', 'Company', 'Property Address', 'Property City', 'Property State', 'Property Zip', 'Mailing Address', 'Mailing City', 'Mailing State', 'Mailing Zip', 'County', 'List']
+  const lines = rows.map(r => { const [fn, ln] = r.company ? ['', ''] : split(r.owner_name); return [fn, ln, r.company || '', r.property_address, r.city, 'FL', r.zip, r.mailing_address, r.mailing_city, r.mailing_state, r.mailing_zip, r.county, r.skip_trace_list || r.list_name || ''].map(q).join(',') })
+  const a = el('a', { href: URL.createObjectURL(new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv' })), download: `skip-trace-${slug(P.list || P.county || 'all')}-${ymd(today())}.csv` })
   document.body.append(a); a.click(); a.remove()
   toast(`${rows.length} owners exported for skip tracing`)
 }
