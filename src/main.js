@@ -1103,7 +1103,7 @@ function contactDetail(c) {
   const tel = telHref(callNum), all = convosFor(c.id), hist = all.filter(v => !isText(v.notes)), texts = all.filter(v => isText(v.notes)), props = propsFor(c.id)
   const talked = el('input', { type: 'date', value: ymd(today()), oninput: markDirty })
   const notes = el('textarea', { rows: 4, placeholder: 'What did you talk about?', oninput: markDirty })
-  const pri = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: (c.priority || 'C') === p })))
+  const pri = priSelect(c)
   const nextDate = el('input', { type: 'date', value: ymd(addCadence(today(), c.priority || 'C')), oninput: markDirty })
   const recalc = () => { nextDate.value = ymd(addCadence(parse(talked.value) || today(), pri.value)) }
   pri.addEventListener('change', recalc); talked.addEventListener('change', recalc)
@@ -1409,6 +1409,66 @@ function openPropertyForm(p = {}) {
   DRAWER.kind = null
   showDrawer(form)
 }
+/* Priority picker on a contact card: A / B / C, plus "Prospect" to send them back to the call list */
+function priSelect(c) {
+  const cur = c.priority || 'C'
+  const s = el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: cur === p })),
+    el('option', { value: 'P', text: 'Prospect — move back to call list' }))
+  s.addEventListener('change', e => { if (s.value !== 'P') return; e.stopImmediatePropagation(); s.value = cur; moveToProspect(c) })
+  return s
+}
+/* Move a contact back onto the prospect list: their prospect record (or a new one) goes back in the call queue
+   with all their numbers, their call history is saved into the prospect's notes and log (so KPIs keep it), then the contact card is removed */
+async function moveToProspect(c) {
+  const hist = convosFor(c.id).slice().sort((a, b) => String(a.talked_on).localeCompare(String(b.talked_on)))
+  if (!confirm(`Move ${c.name} back to your prospect list?\n\nThey go back in the call queue with their numbers and buildings. Their ${hist.length} logged conversation${hist.length === 1 ? '' : 's'} are saved into the prospect's notes, past calls stay in your KPIs, and the contact card is removed.`)) return
+  try {
+    const T = ymd(today())
+    const props = propsFor(c.id)
+    const addr = c.address || props[0]?.address || null
+    // 1. Find their prospect record: the one this contact came from, else one with the same name (and building)
+    let { data: pr } = await sb.from('prospects').select('*').eq('converted_contact_id', c.id).limit(1)
+    let r = pr?.[0]
+    if (!r) {
+      const { data: same } = await sb.from('prospects').select('*').ilike('owner_name', c.name).neq('status', 'Removed').limit(5)
+      r = (same || []).find(x => !addr || String(x.property_address || '').toLowerCase() === addr.toLowerCase()) || (same || [])[0]
+    }
+    const log = hist.map(v => `${v.talked_on}: ${isNote(v.notes) ? noteBody(v.notes) : v.notes}`).join('\n')
+    const carry = [`Moved back from contacts ${T}.`, c.next_note ? `Last next step: ${c.next_note}` : null, log ? 'Call history:\n' + log : null].filter(Boolean).join('\n')
+    const talks = hist.filter(v => !isNote(v.notes) && !isText(v.notes)).length
+    if (r) {
+      const { error } = await sb.from('prospects').update({ status: (r.attempts || talks) ? 'Attempted' : 'New', converted_contact_id: null, next_attempt_on: T,
+        notes: [r.notes, carry].filter(Boolean).join('\n'), email: r.email || c.email || null, updated_at: nowIso() }).eq('id', r.id)
+      if (error) throw error
+    } else {
+      const p0 = props[0] || {}
+      const { data: ins, error } = await sb.from('prospects').insert({ owner_name: c.name, company: c.company || null, email: c.email || null,
+        property_address: addr, city: c.city || p0.city || null, county: c.county || p0.county || null, lat: c.lat ?? p0.lat ?? null, lng: c.lng ?? p0.lng ?? null,
+        parcel_id: c.parcel_id || p0.parcel_id || null, product_type: p0.product_type || null, building_sf: p0.building_sf || null, owner_of_record: p0.owner_of_record || null,
+        status: talks ? 'Attempted' : 'New', attempts: talks, next_attempt_on: T, source: 'Moved back from contacts', title: 'Owner',
+        notes: [c.notes, carry].filter(Boolean).join('\n') }).select('*').single()
+      if (error) throw error
+      r = ins
+    }
+    // 2. Every number on the card goes onto the prospect (duplicates skipped)
+    const nums = (S.phones || []).filter(ph => ph.contact_id === c.id).map(ph => ({ phone: ph.phone, notes: [ph.person_name && ph.person_name !== c.name ? ph.person_name : null, ph.notes].filter(Boolean).join(' · ') || null, status: ph.status }))
+    if (c.phone && !nums.some(n => String(n.phone).replace(/\D/g, '') === String(c.phone).replace(/\D/g, ''))) nums.push({ phone: c.phone, notes: null, status: 'Untested' })
+    const OK = ['Untested', 'Good', 'Voicemail', 'No answer', 'Owner VM', 'Wrong number', 'Disconnected']
+    if (nums.length) {
+      const { error } = await sb.from('prospect_phones').upsert(nums.map(n => ({ prospect_id: r.id, phone: n.phone, status: OK.includes(n.status) ? n.status : 'Untested', attempts: 0, notes: n.notes })), { onConflict: 'prospect_id,digits', ignoreDuplicates: true })
+      if (error) throw error
+    }
+    // 3. Keep the calls in the KPIs: each logged call becomes a dial on the prospect's log
+    const kind = n => { const k = convKind(n); return k === 'na' ? 'No answer' : k === 'vm' ? 'Left voicemail' : 'Spoke' }
+    const calls = hist.filter(v => !isNote(v.notes) && !isText(v.notes)).map(v => ({ prospect_id: r.id, phone_id: null, outcome: `${kind(v.notes)} (moved back from contacts)`, notes: v.notes, called_at: v.talked_on + 'T16:00:00Z' }))
+    if (calls.length) { const { error } = await sb.from('prospect_calls').insert(calls); if (error) throw error }
+    // 4. Remove the contact card
+    for (const t of ['conversations', 'properties', 'contact_phones']) { const { error } = await sb.from(t).delete().eq('contact_id', c.id); if (error) throw error }
+    const { error: e4 } = await sb.from('contacts').delete().eq('id', c.id); if (e4) throw e4
+    closeDrawer(); toast(`${c.name} is back on your prospect list`)
+    await loadAll(); refreshProspects(); render({ soft: true })
+  } catch (x) { toast('Couldn’t move them: ' + (x.message || x)) }
+}
 /* Permanently delete a contact with their logged conversations and linked properties */
 async function deleteContact(c, btn) {
   const nConv = convosFor(c.id).length, nProp = propsFor(c.id).length
@@ -1434,7 +1494,7 @@ function openContactForm(c = {}) {
     company: el('input', { value: v('company') }),
     phone: el('input', { type: 'tel', value: v('phone') }),
     email: el('input', { type: 'email', value: v('email') }),
-    priority: el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: (c.priority || 'C') === p }))),
+    priority: c.id ? priSelect(c) : el('select', null, ['A', 'B', 'C'].map(p => el('option', { value: p, text: `${p} — ${CADENCE[p].label}`, selected: (c.priority || 'C') === p }))),
     contact_type: el('select', null, TYPES.map(t => el('option', { value: t, text: t, selected: (c.contact_type || 'Seller') === t }))),
     address: el('input', { value: v('address'), placeholder: '2121 Cornell St' }),
     city: el('input', { value: v('city'), placeholder: 'Sarasota' }),
