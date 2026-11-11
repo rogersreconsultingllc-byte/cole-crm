@@ -1037,6 +1037,8 @@ const markDirty = e => { e.target.dataset.dirty = '1' }
 async function logCall(c, { note, talked, priority, next, nextTime, nextNote, meeting, propertyId, phoneStatus }) {
   // Tag the call with whoever was on the number picked in "Calling"
   const ph = callingFor(c)
+  // Already have a meeting on the books with this contact? Then this is a new time for it, not another meeting
+  if (meeting && /^meeting set for /i.test(note || '') && pendingMeeting(c.id)) note = note.replace(/^meeting set for /i, 'Meeting rescheduled to ')
   const { error: e1 } = await sb.from('conversations').insert({ contact_id: c.id, talked_on: talked, notes: note, property_id: propertyId || null,
     spoke_with: ph?.person_name || null, phone: ph?.phone || null })
   if (e1) throw e1
@@ -2372,6 +2374,8 @@ function convKind(n) {
   const t = String(n || '').trim(), l = t.toLowerCase()
   if (/^(no answer|didnt answer|didn't answer)/.test(l) || /^called \(.*no answer/.test(l)) return 'na'
   if (/^left voicemail/.test(l) || /left vm/.test(l)) return 'vm'
+  if (/^meeting (rescheduled|confirmed|moved|changed)/.test(l)) return 'note' // same meeting, new time — not another meeting
+  if (/^(meeting set|booked in-person meeting)/.test(l) && /\b(did ?n[o']t happen|didn'?t happen|cancel(l?ed)?|no[- ]show)\b/.test(l)) return 'note'
   if (/^(meeting set|booked in-person meeting)/.test(l)) return 'mset'
   if (/^(meeting held|in-person meeting|zoom bov meeting)/.test(l)) return 'mheld'
   if (MEET_SET_RE.test(l) && !MEET_NEG_RE.test(l)) return 'mset'   // a call note that mentions booking a meeting
@@ -2387,6 +2391,46 @@ function convKind(n) {
   if (l === 'called') return 'dial'
   return 'talk'
 }
+// The date a "Meeting set for Wed, Nov 11 …" note is for (null if no date in the note)
+const _MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 }
+function meetingDateOf(note, setOn) {
+  const m = String(note || '').match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/i)
+    || String(note || '').match(/\b()(\d{1,2})\/(\d{1,2})\b/)
+  if (!m) return null
+  const base = new Date((setOn || ymd(today())) + 'T12:00:00')
+  const mon = m[1] ? _MON[m[1].slice(0, 3).toLowerCase()] : Number(m[2]) - 1, day = m[1] ? Number(m[2]) : Number(m[3])
+  const d = new Date(base.getFullYear(), mon, day, 12)
+  if (d < base - 60 * 864e5) d.setFullYear(d.getFullYear() + 1) // a December set for "Jan 5" is next year
+  return ymd(d)
+}
+// One meeting per contact until it's held: a later "meeting set" for the same contact while one is still
+// on the books (not held, and its date hasn't passed) is a reschedule, not a new meeting.
+function walkMeetings(convs) {
+  let pending = null
+  const repeats = []
+  for (const v of [...convs].sort((a, b) => String(a.talked_on).localeCompare(String(b.talked_on)) || a.id - b.id)) {
+    const k = convKind(v.notes)
+    if (pending && (pending.date ? pending.date < v.talked_on : v.talked_on > pending.until)) pending = null // that meeting date came and went
+    if (k === 'mheld') pending = null
+    else if (k === 'mset') {
+      const date = meetingDateOf(v.notes, v.talked_on)
+      if (pending) { repeats.push(v.id); if (date) pending.date = date }
+      else pending = { id: v.id, date, until: ymd(addBusinessDays(new Date(v.talked_on + 'T12:00:00'), 15)) }
+    }
+  }
+  return { pending, repeats }
+}
+let _MREP = null
+function meetingRepeats() { // conversation ids that are just a reschedule of a meeting already counted
+  const key = `${S.convos.length}|${S.convos[S.convos.length - 1]?.id || 0}`
+  if (_MREP && _MREP.key === key) return _MREP.ids
+  const by = new Map()
+  for (const v of S.convos) (by.get(v.contact_id) || by.set(v.contact_id, []).get(v.contact_id)).push(v)
+  const ids = new Set()
+  for (const list of by.values()) for (const id of walkMeetings(list).repeats) ids.add(id)
+  _MREP = { key, ids }; return ids
+}
+const pendingMeeting = contactId => walkMeetings(S.convos.filter(v => v.contact_id === contactId)).pending
 const KPI = { week: null, calls: null, loading: false, from: null }
 const KPI_METRICS = [
   ['dials', 'Calls (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'],
@@ -2449,6 +2493,7 @@ function kpiDay(day) {
   const seen = new Set()
   for (const v of idx.convos.get(day) || []) {
     const k = convKind(v.notes), key = v.contact_id + '|' + k
+    if (k === 'mset' && meetingRepeats().has(v.id)) continue // rescheduled time for a meeting already counted
     if (k === 'mset' && isTalkMeeting(v.notes) && !seen.has(v.contact_id + '|talk')) { seen.add(v.contact_id + '|talk'); m.dials++; m.connects++; ppl.add('c' + v.contact_id) }
     if (seen.has(key)) continue; seen.add(key)
     if (['talk', 'na', 'vm', 'dial'].includes(k)) { m.dials++; ppl.add('c' + v.contact_id) }
@@ -2594,7 +2639,7 @@ const MEET_KINDS = { mheld: 'Meeting held', mset: 'Meeting set' }
 function meetingsOf(kind, days) {
   const set = new Set(days), seen = new Set()
   return [...S.convos]
-    .filter(v => set.has(v.talked_on) && convKind(v.notes) === kind)
+    .filter(v => set.has(v.talked_on) && convKind(v.notes) === kind && !(kind === 'mset' && meetingRepeats().has(v.id)))
     .sort((a, b) => String(b.talked_on).localeCompare(String(a.talked_on)) || b.id - a.id)
     .filter(v => { const key = v.contact_id + '|' + v.talked_on; if (seen.has(key)) return false; seen.add(key); return true })
 }
