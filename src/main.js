@@ -2674,6 +2674,20 @@ function openMeetingList(kind, days, title) {
     el('p', { class: 'muted', text: rows.length ? `${rows.length} ${rows.length === 1 ? 'person' : 'people'}` : 'No meetings logged in this period.' }),
     el('div', { class: 'stack' }, rows.map(v => meetingCard(v)))))
 }
+// Follow-up meetings: anything set or held with someone you've already met with once
+const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th')
+function repeatMeetings() {
+  const reps = meetingRepeats(), by = new Map(), out = []
+  for (const v of S.convos) { const k = convKind(v.notes); if ((k === 'mheld' || k === 'mset') && !reps.has(v.id)) (by.get(v.contact_id) || by.set(v.contact_id, []).get(v.contact_id)).push([v, k]) }
+  for (const list of by.values()) {
+    let held = 0, heldDays = new Set()
+    for (const [v, k] of list.sort((a, b) => String(a[0].talked_on).localeCompare(String(b[0].talked_on)) || a[0].id - b[0].id)) {
+      if (k === 'mheld') { if (heldDays.has(v.talked_on)) continue; heldDays.add(v.talked_on); held++; if (held >= 2) out.push({ v, label: `${ordinal(held)} meeting held` }) }
+      else if (held >= 1) out.push({ v, label: `${ordinal(held + 1)} meeting set` })
+    }
+  }
+  return out.sort((a, b) => String(b.v.talked_on).localeCompare(String(a.v.talked_on)) || b.v.id - a.v.id)
+}
 function meetingsView() {
   const T = ymd(today())
   const upcoming = S.contacts.filter(c => c.next_follow_up && c.next_follow_up >= T && /^meeting/i.test(c.next_note || '')).sort(byWhen)
@@ -2681,17 +2695,21 @@ function meetingsView() {
   const days = [...new Set(all.map(v => v.talked_on))]
   const held = meetingsOf('mheld', days), set = meetingsOf('mset', days)
   const [tab, setTab] = [S.meetTab || 'held', t => { S.meetTab = t; render({ soft: true }) }]
-  const list = tab === 'held' ? held : set
+  const second = repeatMeetings()
+  const list = tab === 'held' ? held : tab === 'set' ? set : null
   return el('div', null,
     el('div', { class: 'head' },
-      el('div', null, el('h1', { text: 'Meetings' }), el('p', { class: 'muted', text: `${held.length} held · ${set.length} set · ${upcoming.length} coming up` })),
+      el('div', null, el('h1', { text: 'Meetings' }), el('p', { class: 'muted', text: `${held.length} held · ${set.length} set · ${second.length} 2nd meetings · ${upcoming.length} coming up` })),
       el('div', { class: 'actions' }, el('button', { class: 'btn primary', onclick: () => openMeetingForm({}) }, '+ Log meeting'))),
     el('div', { class: 'section-title', text: `Coming up (${upcoming.length})` }),
     el('div', { class: 'card' }, upcoming.length ? el('ul', { class: 'list' }, upcoming.map(c => contactRow(c))) : el('div', { class: 'empty', text: 'No meetings on the books.' })),
     el('div', { class: 'filters', style: 'margin-top:18px' },
       el('button', { class: 'chip' + (tab === 'held' ? ' on' : ''), onclick: () => setTab('held') }, `Meetings held (${held.length})`),
-      el('button', { class: 'chip' + (tab === 'set' ? ' on' : ''), onclick: () => setTab('set') }, `Meetings set (${set.length})`)),
-    el('div', { class: 'stack', style: 'margin-top:10px' }, list.length ? list.map(v => meetingCard(v)) : el('div', { class: 'card empty', text: 'Nothing logged yet — tap “+ Log meeting”.' })))
+      el('button', { class: 'chip' + (tab === 'set' ? ' on' : ''), onclick: () => setTab('set') }, `Meetings set (${set.length})`),
+      el('button', { class: 'chip' + (tab === 'second' ? ' on' : ''), onclick: () => setTab('second') }, `2nd meetings (${second.length})`)),
+    tab === 'second'
+      ? el('div', { class: 'stack', style: 'margin-top:10px' }, second.length ? second.map(r => meetingCard(r.v, { kindLabel: r.label })) : el('div', { class: 'card empty', text: 'No 2nd meetings yet — they show up here when you set or hold another meeting with someone you’ve already met.' }))
+      : el('div', { class: 'stack', style: 'margin-top:10px' }, list.length ? list.map(v => meetingCard(v)) : el('div', { class: 'card empty', text: 'Nothing logged yet — tap “+ Log meeting”.' })))
 }
 function openMeetingForm({ contactId } = {}) {
   const T = today()
