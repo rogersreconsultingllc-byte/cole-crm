@@ -2434,7 +2434,7 @@ const pendingMeeting = contactId => walkMeetings(S.convos.filter(v => v.contact_
 const KPI = { week: null, calls: null, loading: false, from: null }
 const KPI_METRICS = [
   ['dials', 'Calls (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'],
-  ['vm', 'Voicemails left'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings attended'],
+  ['vm', 'Voicemails left'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings attended'], ['m2', '2nd meetings'],
   ['bov', 'Proposals (strategic analyses)'], ['listing', 'Exclusives'], ['newc', 'New contacts'], ['texts', 'People texted'], ['textin', 'Text replies'],
 ]
 function _unusedKpiTargets() { let t = {}; try { t = JSON.parse(localStorage.getItem('kpiTargets') || '{}') } catch { } ; return Object.fromEntries(KPI_METRICS.map(([k, , d]) => [k, t[k] ?? d])) }
@@ -2478,7 +2478,7 @@ function kpiIndex() {
 function kpiDay(day) {
   const idx = kpiIndex()
   if (idx.memo.has(day)) return { ...idx.memo.get(day) }
-  const m = { texts: 0, textin: 0, total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
+  const m = { texts: 0, textin: 0, total: 0, dials: 0, people: 0, connects: 0, vm: 0, na: 0, bad: 0, mset: 0, mheld: 0, m2: 0, bov: 0, listing: 0, contract: 0, closed: 0, income: 0, newc: 0, email: 0 }
   const ppl = new Set()
   for (const c of idx.calls.get(day) || []) {
     const o = c.outcome || ''
@@ -2503,6 +2503,7 @@ function kpiDay(day) {
     else if (k in m) m[k]++
     if (k === 'closed') { const f = String(v.notes).match(/\$\s?([\d,]+(?:\.\d+)?)\s*(k)?/i); if (f) m.income += Number(f[1].replace(/,/g, '')) * (f[2] ? 1000 : 1) }
   }
+  m.m2 = repeatMeetings().filter(r => r.v.talked_on === day).length // set or held with someone already met
   m.newc = idx.newc.get(day) || 0
   m.people = ppl.size
   idx.memo.set(day, m)
@@ -2543,7 +2544,7 @@ function kpiView() {
         WEEK_GOALS[k] ? el('span', { text: WEEK_GOALS[k].map((g, i) => `${TIER[i]} ${+g.toFixed(1)}`).join(' · ') }) : null,
         el('span', { class: 'muted', text: `${k === 'rate' ? (d >= 0 ? '+' : '') + (d * 100).toFixed(1) + ' pts' : (d >= 0 ? '+' : '') + d} vs last wk` })))
   })
-  const rowsDef = [['dials', 'Dials (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts'], ['texts', 'People texted'], ['textin', 'Text replies']]
+  const rowsDef = [['dials', 'Dials (working #s)'], ['total', 'Total dials (incl. bad #s)'], ['people', 'Owners dialed'], ['connects', 'Conversations'], ['rate', 'Contact rate'], ['vm', 'Voicemails'], ['na', 'No answer'], ['bad', 'Bad numbers'], ['mset', 'Meetings set'], ['mheld', 'Meetings held'], ['m2', '2nd meetings'], ['bov', 'Analyses delivered'], ['listing', 'Listings'], ['newc', 'New contacts'], ['texts', 'People texted'], ['textin', 'Text replies']]
   const perDay = weekDays.map(d => { const m = kpiDay(d); m.rate = m.dials ? m.connects / m.dials : 0; return m })
   const daily = el('table', { class: 'kpi-table' },
     el('thead', null, el('tr', null, el('th', { text: '' }), weekDays.map(d => el('th', { text: fmt(d, { weekday: 'short', month: 'numeric', day: 'numeric' }) })), el('th', { text: 'Week' }))),
@@ -2634,7 +2635,7 @@ function milestoneBar(c) {
 }
 
 /* ---------- Meetings (log meeting notes + KPI drill-down) ---------- */
-const MEET_KINDS = { mheld: 'Meeting held', mset: 'Meeting set' }
+const MEET_KINDS = { mheld: 'Meeting held', mset: 'Meeting set', m2: '2nd meeting' }
 // Every meeting conversation of a kind on the given days — deduped one per contact per day, same as the KPI count
 function meetingsOf(kind, days) {
   const set = new Set(days), seen = new Set()
@@ -2667,16 +2668,20 @@ function meetingCard(v, { kindLabel } = {}) {
 }
 // Drawer opened from a KPI: everyone you met with in that period, with their card and the meeting notes
 function openMeetingList(kind, days, title) {
-  const rows = meetingsOf(kind, days)
+  const dset = new Set(days)
+  const rows = kind === 'm2' ? repeatMeetings().filter(r => dset.has(r.v.talked_on)) : meetingsOf(kind, days).map(v => ({ v }))
   DRAWER.kind = 'meetings'; DRAWER.id = null
   showDrawer(el('div', null,
     el('h2', { text: title }),
     el('p', { class: 'muted', text: rows.length ? `${rows.length} ${rows.length === 1 ? 'person' : 'people'}` : 'No meetings logged in this period.' }),
-    el('div', { class: 'stack' }, rows.map(v => meetingCard(v)))))
+    el('div', { class: 'stack' }, rows.map(r => meetingCard(r.v, { kindLabel: r.label })))))
 }
 // Follow-up meetings: anything set or held with someone you've already met with once
 const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th')
+let _RM = null
 function repeatMeetings() {
+  const rmKey = `${S.convos.length}|${S.convos[S.convos.length - 1]?.id || 0}`
+  if (_RM && _RM.key === rmKey) return _RM.out
   const reps = meetingRepeats(), by = new Map(), out = []
   for (const v of S.convos) { const k = convKind(v.notes); if ((k === 'mheld' || k === 'mset') && !reps.has(v.id)) (by.get(v.contact_id) || by.set(v.contact_id, []).get(v.contact_id)).push([v, k]) }
   for (const list of by.values()) {
@@ -2686,7 +2691,8 @@ function repeatMeetings() {
       else if (held >= 1) out.push({ v, label: `${ordinal(held + 1)} meeting set` })
     }
   }
-  return out.sort((a, b) => String(b.v.talked_on).localeCompare(String(a.v.talked_on)) || b.v.id - a.v.id)
+  out.sort((a, b) => String(b.v.talked_on).localeCompare(String(a.v.talked_on)) || b.v.id - a.v.id)
+  _RM = { key: rmKey, out }; return out
 }
 function meetingsView() {
   const T = ymd(today())
