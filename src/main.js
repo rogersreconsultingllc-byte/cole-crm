@@ -29,7 +29,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 /* ---------- State ---------- */
 const S = {
   session: null,
-  contacts: [], convos: [], buyers: [], pins: [], props: [], phones: [],
+  contacts: [], convos: [], buyers: [], pins: [], props: [], phones: [], holiday: [],
   calling: {}, // contact id → contact_phones id picked as "who I'm calling"
   tab: localStorage.getItem('tab') || 'today',
   q: '', pri: new Set(), type: '',
@@ -37,7 +37,7 @@ const S = {
   calMonth: firstOfMonth(new Date()),
   live: false,
 }
-const TABLE_KEY = { contacts: 'contacts', conversations: 'convos', buyers: 'buyers', pins: 'pins', properties: 'props', contact_phones: 'phones' }
+const TABLE_KEY = { contacts: 'contacts', conversations: 'convos', buyers: 'buyers', pins: 'pins', properties: 'props', contact_phones: 'phones', holiday_notes: 'holiday' }
 
 /* ---------- Helpers ---------- */
 function el(tag, attrs, ...kids) {
@@ -126,7 +126,7 @@ const dorInfo = code => { const n = parseInt(code, 10); return isNaN(n) ? null :
 
 /* ---------- Data ---------- */
 async function loadTable(t) {
-  const order = { contacts: 'name', conversations: 'talked_on', buyers: 'name', pins: 'created_at', properties: 'address', contact_phones: 'contact_id' }[t]
+  const order = { contacts: 'name', conversations: 'talked_on', buyers: 'name', pins: 'created_at', properties: 'address', contact_phones: 'contact_id', holiday_notes: 'created_at' }[t]
   // Supabase returns at most 1,000 rows per request — page through so nothing is silently cut off
   const PAGE = 1000, rows = []
   for (let from = 0; ; from += PAGE) {
@@ -239,7 +239,7 @@ function deniedView() {
 }
 
 /* ---------- Shell ---------- */
-const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['meetings', 'Meetings'], ['notes', 'Notes'], ['kpis', 'KPIs']]
+const TABS = [['today', 'Today'], ['contacts', 'Contacts'], ['prospects', 'Prospects'], ['pipeline', 'Pipeline'], ['map', 'Map'], ['calendar', 'Calendar'], ['buyers', 'Buyers'], ['meetings', 'Meetings'], ['notes', 'Notes'], ['holiday', 'Holiday notes'], ['kpis', 'KPIs']]
 function dueCount() { const T = ymd(today()); return S.contacts.filter(c => c.next_follow_up && c.next_follow_up <= T).length }
 
 function render({ soft } = {}) {
@@ -260,7 +260,7 @@ function render({ soft } = {}) {
       el('button', { class: 'btn small primary', onclick: () => openContactForm() }, '+ Contact'),
       el('button', { class: 'btn small ghost signout', onclick: () => sb.auth.signOut() }, 'Sign out')))
   const main = el('main', { class: S.tab === 'map' ? 'full' : S.tab === 'pipeline' && S.pipeMode === 'board' ? 'wide' : '' })
-  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, meetings: meetingsView, notes: notesView, kpis: kpiView }[S.tab] || todayView
+  const view = { today: todayView, contacts: contactsView, prospects: prospectsView, pipeline: pipelineView, calendar: calendarView, map: mapView, buyers: buyersView, meetings: meetingsView, notes: notesView, holiday: holidayView, kpis: kpiView }[S.tab] || todayView
   const active = document.activeElement
   const focused = soft && active && active.dataset && active.dataset.keep
   const caret = focused ? active.selectionStart : null
@@ -1136,6 +1136,7 @@ function contactDetail(c) {
     outcomeBar(c, notes),
     el('button', { class: 'btn small primary', style: 'margin-top:10px', onclick: () => openMeetingForm({ contactId: c.id }) }, '📝 Log meeting notes'),
     milestoneBar(c),
+    holidayButton(c),
     el('div', { class: 'section-title', text: `Properties (${props.length})` }),
     props.length ? el('div', { class: 'card' }, el('ul', { class: 'list' }, props.map(propRow))) : null,
     el('button', { class: 'btn small', style: 'margin-top:8px', onclick: () => openPropertyForm({ contact_id: c.id, city: c.city, stage: 'Contacted' }) }, '+ Add a property'),
@@ -3034,6 +3035,97 @@ function coOwnersSection(c) {
         el('div', { class: 'actions', style: 'margin-top:6px' },
           r.status === 'Converted' && r.converted_contact_id ? el('button', { class: 'btn small', onclick: () => openContact(r.converted_contact_id) }, 'Open their contact card') : el('button', { class: 'btn small', onclick: () => { go('prospects'); openBuilding(b.id) } }, 'Call from the building card')))
     }))
+}
+
+/* ---------- Holiday notes (who gets a holiday card / handwritten note this year) ---------- */
+const holYear = () => S.holYear || today().getFullYear()
+const holidayFor = (cid, y = holYear()) => S.holiday.find(h => h.contact_id === cid && h.year === y)
+async function addToHoliday(ids, y = holYear()) {
+  const rows = ids.filter(id => !holidayFor(id, y)).map(id => ({ contact_id: id, year: y }))
+  if (!rows.length) return 0
+  const { error } = await sb.from('holiday_notes').insert(rows)
+  if (error) throw error
+  await loadTable('holiday_notes')
+  return rows.length
+}
+async function setHolidaySent(h, sent) {
+  const day = ymd(today())
+  const { error } = await sb.from('holiday_notes').update({ sent_on: sent ? day : null }).eq('id', h.id)
+  if (error) { toast(error.message); return }
+  // Keep it in their history as a note (doesn't count as a call or conversation)
+  if (sent) await sb.from('conversations').insert({ contact_id: h.contact_id, talked_on: day, notes: 'Note: Holiday note sent' + (h.note ? ' — ' + h.note : '') })
+  await Promise.all([loadTable('holiday_notes'), sent ? loadTable('conversations') : null])
+  render({ soft: true }); if (DRAWER.kind) refreshDrawer(true)
+}
+function holidayButton(c) {
+  const h = holidayFor(c.id)
+  return el('div', { style: 'margin-top:8px' }, h
+    ? el('button', { class: 'btn small', onclick: () => { go('holiday') ; closeDrawer() } }, h.sent_on ? `🎄 Holiday note sent ${fmt(h.sent_on, { month: 'short', day: 'numeric' })}` : `🎄 On ${holYear()} holiday list ›`)
+    : el('button', { class: 'btn small', onclick: async e => { e.currentTarget.disabled = true; try { await addToHoliday([c.id]); toast(`${c.name} added to holiday notes`); render({ soft: true }); refreshDrawer(true) } catch (x) { toast(x.message) } } }, '🎄 Add to holiday notes'))
+}
+function holidayRow(h) {
+  const c = contactById(h.contact_id); if (!c) return null
+  const save = async (patch) => { const { error } = await sb.from('holiday_notes').update(patch).eq('id', h.id); if (error) toast(error.message); else { Object.assign(h, patch) } }
+  const note = el('input', { placeholder: 'What to write — e.g. thanks for the meeting, hope the trial cases went well', value: h.note || '', onchange: e => save({ note: e.target.value.trim() || null }) })
+  const mail = el('input', { placeholder: 'Mail to (address)', value: h.mail_to || c.address || '', onchange: e => save({ mail_to: e.target.value.trim() || null }) })
+  return el('div', { class: 'card', style: 'padding:12px 14px' + (h.sent_on ? ';opacity:.65' : '') },
+    el('div', { style: 'display:flex;align-items:center;gap:10px' },
+      el('span', { class: 'pri ' + (c.priority || 'C'), text: c.priority || 'C' }),
+      el('div', { style: 'flex:1;min-width:0;cursor:pointer', onclick: () => openContact(c.id) },
+        el('b', { text: c.name }), c.contact_type ? el('span', { class: 'tag ' + c.contact_type, text: c.contact_type, style: 'margin-left:6px' }) : null,
+        el('div', { class: 'muted', style: 'font-size:13px', text: [c.company, c.address].filter(Boolean).join(' · ') })),
+      h.sent_on
+        ? el('button', { class: 'btn small', title: 'Undo', onclick: () => setHolidaySent(h, false) }, `✓ Sent ${fmt(h.sent_on, { month: 'short', day: 'numeric' })}`)
+        : el('button', { class: 'btn small primary', onclick: () => setHolidaySent(h, true) }, 'Mark sent'),
+      el('button', { class: 'btn small ghost', title: 'Remove from list', onclick: async () => { const { error } = await sb.from('holiday_notes').delete().eq('id', h.id); if (error) return toast(error.message); await loadTable('holiday_notes'); render({ soft: true }) } }, '✕')),
+    el('div', { class: 'row2', style: 'margin-top:8px' }, note, mail))
+}
+function holidayView() {
+  const y = holYear()
+  const list = S.holiday.filter(h => h.year === y && contactById(h.contact_id))
+    .sort((a, b) => (!!a.sent_on - !!b.sent_on) || (contactById(a.contact_id).priority || 'C').localeCompare(contactById(b.contact_id).priority || 'C') || contactById(a.contact_id).name.localeCompare(contactById(b.contact_id).name))
+  const sent = list.filter(h => h.sent_on).length
+  const years = [...new Set([today().getFullYear(), ...S.holiday.map(h => h.year)])].sort((a, b) => b - a)
+  return el('div', null,
+    el('div', { class: 'head' },
+      el('div', null, el('h1', { text: 'Holiday notes' }), el('p', { class: 'muted', text: `${y} · ${list.length} on the list · ${sent} sent · ${list.length - sent} to go` })),
+      el('div', { class: 'actions' },
+        years.length > 1 ? el('select', { onchange: e => { S.holYear = Number(e.target.value); render({ soft: true }) } }, years.map(v => el('option', { value: v, text: v, selected: v === y }))) : null,
+        el('button', { class: 'btn primary', onclick: openHolidayPicker }, '+ Add people'))),
+    el('div', { class: 'stack', style: 'margin-top:10px' }, list.length ? list.map(holidayRow) : el('div', { class: 'card empty', text: 'Nobody on the list yet — tap “+ Add people”, or use “🎄 Add to holiday notes” on any contact card.' })))
+}
+function openHolidayPicker() {
+  const y = holYear(), picked = new Set()
+  let q = '', pri = ''
+  const listBox = el('div', { class: 'card', style: 'max-height:55vh;overflow:auto' })
+  const count = el('span', { text: '' })
+  const paint = () => {
+    const rows = [...S.contacts].filter(c => !holidayFor(c.id, y))
+      .filter(c => (!pri || (c.priority || 'C') === pri) && (!q || (c.name + ' ' + (c.company || '') + ' ' + (c.address || '')).toLowerCase().includes(q)))
+      .sort((a, b) => (a.priority || 'C').localeCompare(b.priority || 'C') || a.name.localeCompare(b.name))
+    listBox.replaceChildren(rows.length ? el('ul', { class: 'list' }, rows.map(c => {
+      const box = el('input', { type: 'checkbox', checked: picked.has(c.id), onclick: e => e.stopPropagation(), onchange: e => { e.target.checked ? picked.add(c.id) : picked.delete(c.id); count.textContent = picked.size ? `Add ${picked.size}` : 'Add' } })
+      return el('li', { class: 'item', onclick: () => { box.checked = !box.checked; box.onchange({ target: box }) } }, box,
+        el('span', { class: 'pri ' + (c.priority || 'C'), text: c.priority || 'C' }),
+        el('div', { class: 'who' }, el('div', { class: 'name', text: c.name }), el('div', { class: 'sub', text: [c.company, c.address].filter(Boolean).join(' · ') })))
+    })) : el('div', { class: 'empty', text: 'Everyone matching is already on the list.' }))
+  }
+  const chips = el('div', { class: 'filters' }, ['', 'A', 'B', 'C'].map(p => el('button', { class: 'chip' + (p === pri ? ' on' : ''), onclick: e => { pri = p; chips.querySelectorAll('.chip').forEach(n => n.classList.remove('on')); e.currentTarget.classList.add('on'); paint() } }, p || 'All')))
+  const allBtn = el('button', { class: 'btn small', onclick: () => { listBox.querySelectorAll('input[type=checkbox]').forEach(b => { if (!b.checked) { b.checked = true; b.onchange({ target: b }) } }) } }, 'Select all shown')
+  const add = el('button', { class: 'btn primary', onclick: async () => {
+    if (!picked.size) return toast('Pick at least one person')
+    add.disabled = true
+    try { const n = await addToHoliday([...picked], y); toast(`${n} added to ${y} holiday notes`); closeDrawer(); render({ soft: true }) } catch (x) { toast(x.message); add.disabled = false }
+  } }, count)
+  count.textContent = 'Add'
+  DRAWER.kind = null; DRAWER.id = null
+  showDrawer(el('div', { class: 'stack' },
+    el('h2', { text: `Add to ${y} holiday notes` }),
+    el('input', { class: 'search', placeholder: 'Search contacts…', oninput: e => { q = e.target.value.toLowerCase(); paint() } }),
+    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, chips, allBtn),
+    listBox,
+    el('div', { class: 'actions' }, add)))
+  paint()
 }
 
 boot()
