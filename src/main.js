@@ -1799,7 +1799,7 @@ function setPF(patch) { Object.assign(P, patch, { page: 0 }); try { localStorage
 /* Building drawer */
 // Buildings you've opened, in order — "Previous" walks back through them even after the list re-sorts
 const PHIST = []
-const BCTX = { id: null, b: null, showRemoved: false }
+const BCTX = { id: null, b: null, showRemoved: false, tab: 'call' }
 function prevBuildingId(id) {
   const i = PHIST.lastIndexOf(id)
   if (i > 0) return PHIST[i - 1]
@@ -1825,6 +1825,7 @@ async function openBuilding(id, { back } = {}) {
   const { data, error } = await sb.from('prospect_buildings')
     .select('*, prospect_building_people(role, verified, prospects(*, prospect_phones(*), prospect_calls(*), prospect_building_people(building_id, verified)))').eq('id', id).single()
   if (error) { toast(error.message); return }
+  if (BCTX.id !== id) BCTX.tab = 'call'
   BCTX.id = id; BCTX.b = data
   DRAWER.kind = null
   showDrawer(buildingDetail(data))
@@ -1850,6 +1851,11 @@ function buildingDetail(b) {
     el('div', { class: 'actions', style: 'margin-top:6px' },
       el('a', { href: mapsHref(addr), target: '_blank', rel: 'noopener', text: [b.property_name ? b.address : null, b.city, b.county ? b.county + ' County' : null].filter(Boolean).join(' · ') || addr }),
       paButton(b, { cls: 'btn small' })),
+    debtStrip(b),
+    b.debt ? el('div', { class: 'seg btabs', style: 'margin:10px 0 2px' },
+      [['call', 'Owners & calls'], ['debt', '🏦 Debt & loan']].map(([k, label]) => el('button', { class: BCTX.tab === k ? 'on' : '', 'data-btab': k, onclick: () => setBTab(k) }, label))) : null,
+    b.debt ? el('div', { class: 'bpane' + (BCTX.tab === 'debt' ? '' : ' hidden'), 'data-pane': 'debt' }, debtDetail(b)) : null,
+    el('div', { class: 'bpane' + (b.debt && BCTX.tab === 'debt' ? ' hidden' : ''), 'data-pane': 'call' },
     el('dl', { class: 'facts' },
       (b.product_type || b.use_desc || b.building_sf) ? [el('dt', { text: 'Building' }), el('dd', { text: [b.product_type || (b.use_desc ? b.use_desc.toLowerCase() : null), b.building_sf ? num(b.building_sf) + ' SF' : null, b.year_built ? 'built ' + b.year_built : null].filter(Boolean).join(' · ') })] : null,
       [el('dt', { text: 'County owner' }), el('dd', { text: b.owner_of_record || '—' })],
@@ -1877,7 +1883,57 @@ function buildingDetail(b) {
       el('button', { class: 'btn', disabled: !prevBuildingId(b.id), onclick: goPrevBuilding }, '← Previous building'),
       el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => goNextProspect(null) }, 'Next building →')),
     calls.length ? [el('div', { class: 'section-title', text: `Attempts (${calls.length})` }),
-      el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' · ' + c.who }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null)
+      el('ul', { class: 'timeline' }, calls.map(c => el('li', null, el('div', { class: 'date', text: new Date(c.called_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' · ' + c.who }), el('div', { class: 'txt', text: c.outcome + (c.notes ? ' — ' + c.notes : '') }))))] : null))
+}
+/* Debt & loan tab — the loan data from the Capitalize spreadsheet (prospect_buildings.debt), laid out like the sheet's columns */
+function setBTab(k) {
+  BCTX.tab = k
+  document.querySelectorAll('.drawer [data-btab]').forEach(x => x.classList.toggle('on', x.dataset.btab === k))
+  document.querySelectorAll('.drawer [data-pane]').forEach(x => x.classList.toggle('hidden', x.dataset.pane !== k))
+}
+const debtPct = (n, d = 2) => n == null || n === '' ? null : (Number(n) * 100).toFixed(d).replace(/\.?0+$/, '') + '%'
+function debtTiming(m) {
+  const d = parse(m); if (!d) return null
+  const days = Math.round((d - today()) / 864e5), mo = Math.round(days / 30.44)
+  const text = days < 0 ? `matured ${-days} day${days === -1 ? '' : 's'} ago` : days === 0 ? 'matures today' : days < 45 ? `in ${days} days` : `in ~${mo} months`
+  return { days, mo, text, cls: days <= 90 ? 'hot' : days <= 180 ? 'warm' : '' }
+}
+function debtStrip(b) {
+  const d = b.debt; if (!d) return null
+  const t = debtTiming(d.m)
+  return el('div', { class: 'debt-strip ' + (t?.cls || ''), title: 'Open the Debt & loan tab', onclick: () => setBTab('debt') },
+    el('b', { text: `🏦 Debt matures ${fmt(d.m, { month: 'short', day: 'numeric', year: 'numeric' })}` }),
+    t ? el('span', { text: ` (${t.text})` }) : null,
+    el('div', { class: 'muted', text: [d.amt ? moneyShort(d.amt) + ' mortgage' : null, d.l, d.r ? debtPct(d.r) : null, d.ltv ? debtPct(d.ltv, 0) + ' LTV' : null].filter(Boolean).join(' · ') }))
+}
+function debtDetail(b) {
+  const d = b.debt || {}
+  const t = debtTiming(d.m)
+  const row = (label, v) => v == null || v === '' ? null : [el('dt', { text: label }), el('dd', null, v)]
+  const od = parse(d.od), yrs = od ? ((today() - od) / (365.25 * 864e5)) : null
+  const hist = s => s ? el('ul', { class: 'debt-hist' }, String(s).split(/;\s*/).filter(Boolean).map(x => el('li', { text: x.trim() }))) : null
+  return el('div', null,
+    el('div', { class: 'debt-big ' + (t?.cls || '') },
+      el('div', { class: 'muted', style: 'font-size:12px;text-transform:uppercase;letter-spacing:.04em', text: 'Maturity date' }),
+      el('div', { style: 'font-size:22px;font-weight:700', text: fmt(d.m, LONG) }),
+      t ? el('div', { text: t.days < 0 ? t.text : `${t.text} · ${t.mo} month${t.mo === 1 ? '' : 's'} to maturity` }) : null),
+    el('div', { class: 'section-title', text: 'Loan' }),
+    el('dl', { class: 'facts' },
+      row('Lender', d.l), row('Lender type', d.lt), row('Loan purpose', d.lp),
+      row('Mortgage amount', d.amt != null ? money(d.amt) : null), row('Interest rate', debtPct(d.r)), row('LTV', debtPct(d.ltv, 1)),
+      row('Origination', d.od ? fmt(d.od, { month: 'short', day: 'numeric', year: 'numeric' }) + (yrs != null ? ` · ${yrs.toFixed(1)} yrs ago` : '') : null),
+      row('Maturity', d.m ? fmt(d.m, { month: 'short', day: 'numeric', year: 'numeric' }) : null), row('Est. term', d.t),
+      row('Mortgage doc #', d.doc), row('Portfolio loan', d.pl)),
+    el('div', { class: 'section-title', text: 'Purchase & ownership' }),
+    el('dl', { class: 'facts' },
+      row('Owner / borrower', d.o), row('Seller', d.sel), row('Sale amount', d.sa != null ? money(d.sa) : null),
+      row('Tenant', d.tn), row('Office subtype', d.os), row('Land use', d.lu)),
+    d.pm ? [el('div', { class: 'section-title', text: 'Prior mortgages' }), hist(d.pm)] : null,
+    d.h ? [el('div', { class: 'section-title', text: 'Sale / transfer history' }), hist(d.h)] : null,
+    el('div', { class: 'actions', style: 'margin-top:12px' },
+      d.cap ? el('a', { class: 'btn small', href: 'https://www.capitalize.io/dashboard/loans/' + d.cap, target: '_blank', rel: 'noopener', text: 'Open loan in Capitalize ↗' }) : null,
+      el('button', { class: 'btn small', onclick: () => setBTab('call') }, '← Back to owners & calls')),
+    d.src ? el('p', { class: 'muted', style: 'font-size:12px;margin-top:10px', text: 'Source: ' + d.src }) : null)
 }
 // One owner/manager on a building: their name, how they check out, and their numbers right underneath
 const calledToday = ph => !!ph.last_called_at && ymd(new Date(ph.last_called_at)) === ymd(today())

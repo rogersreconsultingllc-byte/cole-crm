@@ -406,3 +406,11 @@ select.mini { font-size: 12px; padding: 3px 6px; border-radius: 8px; width: auto
 .queuebar .muted { color: #5a6f9e; }
 .item.done { opacity: .5; }
 .item.done .name::after { content: ' ✓'; color: #1f7a4d; }
+
+/* Debt & loan tab on building cards */
+.btabs button { font-size: 13px; }
+.debt-strip { margin: 10px 0 0; padding: 8px 12px; border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 9px; background: var(--panel); font-size: 13.5px; cursor: pointer; line-height: 1.45; }
+.debt-strip.warm, .debt-big.warm { border-left-color: #d99a1e; }
+.debt-strip.hot, .debt-big.hot { border-left-color: #d64545; }
+.debt-big { margin: 12px 0 4px; padding: 10px 14px; border: 1px solid var(--line); border-left: 5px solid var(--muted); border-radius: 10px; background: var(--panel); }
+.debt-hist { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.5; }
