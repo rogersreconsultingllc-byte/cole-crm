@@ -1895,7 +1895,7 @@ const debtPct = (n, d = 2) => n == null || n === '' ? null : (Number(n) * 100).t
 function debtTiming(m) {
   const d = parse(m); if (!d) return null
   const days = Math.round((d - today()) / 864e5), mo = Math.round(days / 30.44)
-  const text = days < 0 ? `matured ${-days} day${days === -1 ? '' : 's'} ago` : days === 0 ? 'matures today' : days < 45 ? `in ${days} days` : `in ~${mo} months`
+  const text = days < 0 ? `matured ${-days} day${days === -1 ? '' : 's'} ago` : days === 0 ? 'matures today' : days < 60 ? `in ${days} days` : `in ~${mo} months`
   return { days, mo, text, cls: days <= 90 ? 'hot' : days <= 180 ? 'warm' : '' }
 }
 function debtStrip(b) {
@@ -1916,7 +1916,7 @@ function debtDetail(b) {
     el('div', { class: 'debt-big ' + (t?.cls || '') },
       el('div', { class: 'muted', style: 'font-size:12px;text-transform:uppercase;letter-spacing:.04em', text: 'Maturity date' }),
       el('div', { style: 'font-size:22px;font-weight:700', text: fmt(d.m, LONG) }),
-      t ? el('div', { text: t.days < 0 ? t.text : `${t.text} · ${t.mo} month${t.mo === 1 ? '' : 's'} to maturity` }) : null),
+      t ? el('div', { text: t.days < 0 ? t.text : `${t.days} days · ~${t.mo || '<1'} month${t.mo === 1 ? '' : 's'} to maturity` }) : null),
     el('div', { class: 'section-title', text: 'Loan' }),
     el('dl', { class: 'facts' },
       row('Lender', d.l), row('Lender type', d.lt), row('Loan purpose', d.lp),
